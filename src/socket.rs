@@ -97,6 +97,8 @@ impl UServerWrap {
     pub fn listen(&self, path: &str, backlog: i32) -> Result<(), io::Error> {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
+        // 设置为非阻塞模式
+        listener.set_nonblocking(true)?;
         *self.fd.borrow_mut() = Some(listener.as_raw_fd());
         *self.listener.borrow_mut() = Some(listener);
         let _ = backlog;
@@ -130,20 +132,23 @@ fn usocket_wrap_new(mut cx: FunctionContext) -> JsResult<JsBox<USocketWrap>> {
     Ok(cx.boxed(USocketWrap::new()))
 }
 
-fn usocket_wrap_connect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn usocket_wrap_connect(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let path = cx.argument::<JsString>(1)?.value(&mut cx);
     match usocket_wrap.connect(&path) {
-        Ok(_) => Ok(cx.undefined()),
+        Ok(_) => {
+            let fd = usocket_wrap.fd.borrow();
+            Ok(cx.number(fd.unwrap_or(-1) as f64))
+        }
         Err(e) => cx.throw_error(format!("Connect failed: {}", e)),
     }
 }
 
-fn usocket_wrap_adopt(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn usocket_wrap_adopt(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let fd = cx.argument::<JsNumber>(1)?.value(&mut cx) as RawFd;
     match usocket_wrap.adopt(fd) {
-        Ok(_) => Ok(cx.undefined()),
+        Ok(_) => Ok(cx.number(fd as f64)),
         Err(e) => cx.throw_error(format!("Adopt failed: {}", e)),
     }
 }
@@ -223,12 +228,15 @@ fn userver_wrap_new(mut cx: FunctionContext) -> JsResult<JsBox<UServerWrap>> {
     Ok(cx.boxed(UServerWrap::new()))
 }
 
-fn userver_wrap_listen(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn userver_wrap_listen(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
     let path = cx.argument::<JsString>(1)?.value(&mut cx);
     let backlog = cx.argument::<JsNumber>(2)?.value(&mut cx) as i32;
     match userver_wrap.listen(&path, backlog) {
-        Ok(_) => Ok(cx.undefined()),
+        Ok(_) => {
+            let fd = userver_wrap.fd.borrow();
+            Ok(cx.number(fd.unwrap_or(-1) as f64))
+        }
         Err(e) => cx.throw_error(format!("Listen failed: {}", e)),
     }
 }
