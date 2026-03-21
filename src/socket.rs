@@ -1,15 +1,15 @@
 use neon::prelude::*;
 use neon::types::buffer::TypedArray;
 use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, IoSliceMut, Read};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+
+use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr};
 
 pub struct USocketWrap {
     stream: RefCell<Option<UnixStream>>,
     fd: RefCell<Option<RawFd>>,
-    fds_queue: RefCell<VecDeque<RawFd>>,
 }
 
 impl Finalize for USocketWrap {}
@@ -19,7 +19,6 @@ impl USocketWrap {
         Self {
             stream: RefCell::new(None),
             fd: RefCell::new(None),
-            fds_queue: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -38,18 +37,22 @@ impl USocketWrap {
     }
 
     pub fn write(&self, data: Option<&[u8]>, fds: Option<&[RawFd]>) -> Result<usize, io::Error> {
-        let mut stream = self.stream.borrow_mut();
-        if let Some(stream) = stream.as_mut() {
-            let mut written = 0;
-            if let Some(data) = data {
-                written = stream.write(data)?;
-            }
-            if let Some(fds) = fds {
-                let mut fds_queue = self.fds_queue.borrow_mut();
-                for fd in fds {
-                    fds_queue.push_back(*fd);
-                }
-            }
+        let stream = self.stream.borrow();
+        if let Some(stream) = stream.as_ref() {
+            let raw_fd = stream.as_raw_fd();
+
+            let data_buf = data.unwrap_or(&[]);
+            let iov = [IoSlice::new(data_buf)];
+
+            let written = if let Some(fds) = fds {
+                let cmsg = ControlMessage::ScmRights(fds);
+                sendmsg::<UnixAddr>(raw_fd, &iov, &[cmsg], MsgFlags::empty(), None)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            } else {
+                sendmsg::<UnixAddr>(raw_fd, &iov, &[], MsgFlags::empty(), None)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            };
+
             Ok(written)
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
@@ -60,6 +63,31 @@ impl USocketWrap {
         let mut stream = self.stream.borrow_mut();
         if let Some(stream) = stream.as_mut() {
             stream.read(buf)
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
+        }
+    }
+
+    pub fn read_with_fds(&self, buf: &mut [u8]) -> Result<(usize, Vec<RawFd>), io::Error> {
+        let stream = self.stream.borrow();
+        if let Some(stream) = stream.as_ref() {
+            let raw_fd = stream.as_raw_fd();
+            let mut iov = [IoSliceMut::new(buf)];
+
+            // 分配控制消息缓冲区，足够接收 fd
+            let mut cmsg_buf = nix::cmsg_space!([RawFd; 3]);
+
+            let msg = recvmsg::<UnixAddr>(raw_fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            let mut fds = Vec::new();
+            for cmsg in msg.cmsgs() {
+                if let ControlMessageOwned::ScmRights(received_fds) = cmsg {
+                    fds.extend(received_fds);
+                }
+            }
+
+            Ok((msg.bytes, fds))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
         }
@@ -97,7 +125,6 @@ impl UServerWrap {
     pub fn listen(&self, path: &str, backlog: i32) -> Result<(), io::Error> {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
-        // 设置为非阻塞模式
         listener.set_nonblocking(true)?;
         *self.fd.borrow_mut() = Some(listener.as_raw_fd());
         *self.listener.borrow_mut() = Some(listener);
@@ -210,6 +237,37 @@ fn usocket_wrap_read(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     }
 }
 
+fn usocket_wrap_read_with_fds(mut cx: FunctionContext) -> JsResult<JsObject> {
+    let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
+    let size = cx.argument::<JsNumber>(1)?.value(&mut cx) as usize;
+    let mut buf = vec![0u8; size];
+
+    match usocket_wrap.read_with_fds(&mut buf) {
+        Ok((n, fds)) => {
+            let data = if n > 0 {
+                let mut result = JsBuffer::new(&mut cx, n)?;
+                let slice = result.as_mut_slice(&mut cx);
+                slice.copy_from_slice(&buf[..n]);
+                result.as_value(&mut cx)
+            } else {
+                cx.null().upcast()
+            };
+
+            let fds_array = JsArray::new(&mut cx, fds.len());
+            for (i, fd) in fds.iter().enumerate() {
+                let fd_js = cx.number(*fd as f64);
+                fds_array.set(&mut cx, i as u32, fd_js)?;
+            }
+
+            let obj = JsObject::new(&mut cx);
+            obj.set(&mut cx, "data", data)?;
+            obj.set(&mut cx, "fds", fds_array)?;
+            Ok(obj)
+        }
+        Err(e) => cx.throw_error(format!("Read with fds failed: {}", e)),
+    }
+}
+
 fn usocket_wrap_shutdown(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     match usocket_wrap.shutdown() {
@@ -263,6 +321,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("USocketWrap_adopt", usocket_wrap_adopt)?;
     cx.export_function("USocketWrap_write", usocket_wrap_write)?;
     cx.export_function("USocketWrap_read", usocket_wrap_read)?;
+    cx.export_function("USocketWrap_read_with_fds", usocket_wrap_read_with_fds)?;
     cx.export_function("USocketWrap_shutdown", usocket_wrap_shutdown)?;
     cx.export_function("USocketWrap_close", usocket_wrap_close)?;
 

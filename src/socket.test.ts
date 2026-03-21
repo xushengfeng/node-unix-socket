@@ -1,4 +1,6 @@
+import * as child_process from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { UServer, USocket } from "./index";
@@ -299,10 +301,7 @@ describe("Unix Socket Module", () => {
 			while (Date.now() - readStartTime < 1000) {
 				const data = serverSocket!.read(1024);
 				if (data && data.length > 0) {
-					// 可能一次读取到多条消息
-					const fullMessage = data.toString();
-					// 简单分割（假设消息是连续的）
-					received.push(fullMessage);
+					received.push(data.toString());
 				}
 				if (received.join("").length >= messages.join("").length) break;
 			}
@@ -413,10 +412,20 @@ describe("Unix Socket Module", () => {
 			serverSocket!.close();
 			server.close();
 		});
+	});
 
-		it("should handle empty buffer", () => {
-			const socketPath = path.join(testSocketDir, "transfer-empty");
+	describe("File Descriptor Transfer (SCM_RIGHTS)", () => {
+		it("should send and receive file descriptor", () => {
+			const socketPath = path.join(testSocketDir, "fd-transfer");
 			cleanupSocket(socketPath);
+
+			// 创建临时文件
+			const tmpFile = path.join(os.tmpdir(), `usocket-test-${Date.now()}.txt`);
+			const testContent = "Hello from transferred fd!";
+			fs.writeFileSync(tmpFile, testContent);
+
+			// 获取文件描述符
+			const fileFd = fs.openSync(tmpFile, "r");
 
 			const server = new UServer();
 			server.listen(socketPath);
@@ -434,14 +443,115 @@ describe("Unix Socket Module", () => {
 
 			expect(serverSocket).not.toBeNull();
 
-			// 发送空 buffer
-			const emptyData = Buffer.alloc(0);
-			const bytesWritten = client.write(emptyData);
-			expect(bytesWritten).toBe(0);
+			// 客户端发送 fd
+			const message = Buffer.from("fd-transfer");
+			const bytesWritten = client.write(message, [fileFd]);
+			expect(bytesWritten).toBe(message.length);
+
+			// 服务器读取 fd
+			let result: { data: Buffer | null; fds: number[] } | null = null;
+			const readStartTime = Date.now();
+
+			while (Date.now() - readStartTime < 1000) {
+				result = serverSocket!.readWithFds(1024);
+				if (result && result.fds.length > 0) break;
+			}
+
+			expect(result).not.toBeNull();
+			expect(result!.fds.length).toBe(1);
+
+			// 使用接收到的 fd 读取文件内容
+			const receivedFd = result!.fds[0];
+			const readContent = fs.readFileSync(receivedFd, "utf-8");
+			expect(readContent).toBe(testContent);
+
+			// 清理
+			fs.closeSync(fileFd);
+			fs.closeSync(receivedFd);
+			fs.unlinkSync(tmpFile);
 
 			client.close();
 			serverSocket!.close();
 			server.close();
 		});
+
+		it("should send and receive multiple file descriptors", () => {
+			const socketPath = path.join(testSocketDir, "fd-transfer-multi");
+			cleanupSocket(socketPath);
+
+			// 创建多个临时文件
+			const tmpFiles: string[] = [];
+			const fileFds: number[] = [];
+			const testContents: string[] = [];
+
+			for (let i = 0; i < 3; i++) {
+				const tmpFile = path.join(
+					os.tmpdir(),
+					`usocket-test-${Date.now()}-${i}.txt`,
+				);
+				const testContent = `File content ${i}`;
+				fs.writeFileSync(tmpFile, testContent);
+				tmpFiles.push(tmpFile);
+				fileFds.push(fs.openSync(tmpFile, "r"));
+				testContents.push(testContent);
+			}
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 客户端发送多个 fd
+			const message = Buffer.from("multi-fd-transfer");
+			const bytesWritten = client.write(message, fileFds);
+			expect(bytesWritten).toBe(message.length);
+
+			// 服务器读取 fd
+			let result: { data: Buffer | null; fds: number[] } | null = null;
+			const readStartTime = Date.now();
+
+			while (Date.now() - readStartTime < 1000) {
+				result = serverSocket!.readWithFds(1024);
+				if (result && result.fds.length >= 3) break;
+			}
+
+			expect(result).not.toBeNull();
+			expect(result!.fds.length).toBe(3);
+
+			// 验证每个 fd 的内容
+			for (let i = 0; i < 3; i++) {
+				const readContent = fs.readFileSync(result!.fds[i], "utf-8");
+				expect(readContent).toBe(testContents[i]);
+			}
+
+			// 清理
+			for (const fd of fileFds) {
+				fs.closeSync(fd);
+			}
+			for (const fd of result!.fds) {
+				fs.closeSync(fd);
+			}
+			for (const tmpFile of tmpFiles) {
+				fs.unlinkSync(tmpFile);
+			}
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		// 跨进程 fd 传输测试需要更复杂的同步机制，暂时跳过
+		// 可以使用 child_process.fork 或 spawn 来实现
 	});
 });

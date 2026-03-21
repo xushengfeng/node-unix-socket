@@ -9,6 +9,10 @@ interface NativeModule {
 	USocketWrap_adopt: (wrap: any, fd: number) => number;
 	USocketWrap_write: (wrap: any, data?: Buffer, fds?: number[]) => number;
 	USocketWrap_read: (wrap: any, size: number) => Buffer;
+	USocketWrap_read_with_fds: (
+		wrap: any,
+		size: number,
+	) => { data: Buffer | null; fds: number[] };
 	USocketWrap_shutdown: (wrap: any) => void;
 	USocketWrap_close: (wrap: any) => void;
 	UServerWrap: () => any;
@@ -29,10 +33,14 @@ export interface USocketWriteChunk {
 	fds?: number[];
 }
 
+export interface ReadWithFdsResult {
+	data: Buffer | null;
+	fds: number[];
+}
+
 export class USocket {
 	fd?: number;
 	private _wrap: any = null;
-	private _fds: number[] = [];
 
 	constructor(opts?: USocketOptions | string) {
 		if (typeof opts === "string") {
@@ -51,7 +59,6 @@ export class USocket {
 			opts = { path: opts };
 		}
 		this._wrap = nativeModule.USocketWrap();
-		this._fds = [];
 		if (typeof opts.fd === "number") {
 			const result = nativeModule.USocketWrap_adopt(this._wrap, opts.fd);
 			this.fd = result >= 0 ? result : undefined;
@@ -73,24 +80,9 @@ export class USocket {
 		return nativeModule.USocketWrap_read(this._wrap, size);
 	}
 
-	readWithFds(
-		size: number,
-		fdCount: number | null,
-	): { data: Buffer | null; fds: number[] } | null {
+	readWithFds(size: number): ReadWithFdsResult | null {
 		if (!this._wrap) return null;
-		const fdCountToRead = fdCount === null ? this._fds.length : fdCount;
-		if (this._fds.length < fdCountToRead) return null;
-		const data = this.read(size);
-		const fds = this._fds.splice(0, fdCountToRead);
-		return { data, fds };
-	}
-
-	unshift(chunk: Buffer, fds?: number[]): void {
-		if (Array.isArray(fds)) {
-			while (fds.length > 0) {
-				this._fds.unshift(fds.pop()!);
-			}
-		}
+		return nativeModule.USocketWrap_read_with_fds(this._wrap, size);
 	}
 
 	shutdown(): void {

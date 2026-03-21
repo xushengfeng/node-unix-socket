@@ -11,7 +11,7 @@ export default defineConfig({
     },
     rollupOptions: {
       // 确保原生模块被排除在打包之外
-      external: [/\.node$/, 'module', 'events'],
+      external: [/\.node$/, 'module', 'events', 'node:events', 'node:path', 'node:fs', 'node:os', 'node:child_process'],
       output: {
         exports: 'named',
       },
