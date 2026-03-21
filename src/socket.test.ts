@@ -6,6 +6,18 @@ import { UServer, USocket } from "./index";
 describe("Unix Socket Module", () => {
 	const testSocketDir = "/tmp/usocket-tests";
 
+	// 确保测试目录存在
+	if (!fs.existsSync(testSocketDir)) {
+		fs.mkdirSync(testSocketDir, { recursive: true });
+	}
+
+	// 清理函数
+	function cleanupSocket(socketPath: string) {
+		try {
+			fs.unlinkSync(socketPath);
+		} catch {}
+	}
+
 	describe("USocket", () => {
 		it("should create a new instance without arguments", () => {
 			const socket = new USocket();
@@ -30,6 +42,36 @@ describe("Unix Socket Module", () => {
 			const socket = new USocket();
 			expect(() => socket.close()).not.toThrow();
 		});
+
+		it("should connect to a server", () => {
+			const socketPath = path.join(testSocketDir, "client-connect");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+			expect(client.fd).toBeDefined();
+
+			client.close();
+			server.close();
+		});
+
+		it("should throw error when connecting twice", () => {
+			const socketPath = path.join(testSocketDir, "client-twice");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+			expect(() => client.connect(socketPath)).toThrow(
+				"connect on already connected USocket",
+			);
+
+			client.close();
+			server.close();
+		});
 	});
 
 	describe("UServer", () => {
@@ -42,19 +84,8 @@ describe("Unix Socket Module", () => {
 		});
 
 		it("should listen on a socket path", () => {
-			const socketPath = path.join(testSocketDir, "server-1");
-
-			// 确保测试目录存在
-			if (!fs.existsSync(testSocketDir)) {
-				fs.mkdirSync(testSocketDir, { recursive: true });
-			}
-
-			// 清理可能存在的旧 socket 文件
-			try {
-				fs.unlinkSync(socketPath);
-			} catch {
-				// 忽略
-			}
+			const socketPath = path.join(testSocketDir, "server-listen");
+			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
@@ -66,17 +97,8 @@ describe("Unix Socket Module", () => {
 		});
 
 		it("should emit listening event", () => {
-			const socketPath = path.join(testSocketDir, "server-2");
-
-			if (!fs.existsSync(testSocketDir)) {
-				fs.mkdirSync(testSocketDir, { recursive: true });
-			}
-
-			try {
-				fs.unlinkSync(socketPath);
-			} catch {
-				// 忽略
-			}
+			const socketPath = path.join(testSocketDir, "server-event");
+			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			let eventEmitted = false;
@@ -93,19 +115,10 @@ describe("Unix Socket Module", () => {
 		});
 
 		it("should throw error when listening twice", () => {
-			const socketPath1 = path.join(testSocketDir, "server-3a");
-			const socketPath2 = path.join(testSocketDir, "server-3b");
-
-			if (!fs.existsSync(testSocketDir)) {
-				fs.mkdirSync(testSocketDir, { recursive: true });
-			}
-
-			try {
-				fs.unlinkSync(socketPath1);
-			} catch {}
-			try {
-				fs.unlinkSync(socketPath2);
-			} catch {}
+			const socketPath1 = path.join(testSocketDir, "server-twice-1");
+			const socketPath2 = path.join(testSocketDir, "server-twice-2");
+			cleanupSocket(socketPath1);
+			cleanupSocket(socketPath2);
 
 			const server = new UServer();
 			server.listen(socketPath1);
@@ -118,15 +131,8 @@ describe("Unix Socket Module", () => {
 		});
 
 		it("should return null when accepting without connections", () => {
-			const socketPath = path.join(testSocketDir, "server-4");
-
-			if (!fs.existsSync(testSocketDir)) {
-				fs.mkdirSync(testSocketDir, { recursive: true });
-			}
-
-			try {
-				fs.unlinkSync(socketPath);
-			} catch {}
+			const socketPath = path.join(testSocketDir, "server-accept-null");
+			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
@@ -138,15 +144,8 @@ describe("Unix Socket Module", () => {
 		});
 
 		it("should handle pause and resume", () => {
-			const socketPath = path.join(testSocketDir, "server-5");
-
-			if (!fs.existsSync(testSocketDir)) {
-				fs.mkdirSync(testSocketDir, { recursive: true });
-			}
-
-			try {
-				fs.unlinkSync(socketPath);
-			} catch {}
+			const socketPath = path.join(testSocketDir, "server-pause");
+			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
@@ -165,6 +164,284 @@ describe("Unix Socket Module", () => {
 		it("should handle close on non-listening server", () => {
 			const server = new UServer();
 			expect(() => server.close()).not.toThrow();
+		});
+
+		it("should accept a connection", () => {
+			const socketPath = path.join(testSocketDir, "server-accept");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			// 创建客户端连接
+			const client = new USocket(socketPath);
+
+			// 等待一下让连接建立
+			const startTime = Date.now();
+			let acceptedSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				acceptedSocket = server.accept();
+				if (acceptedSocket) break;
+			}
+
+			expect(acceptedSocket).not.toBeNull();
+			expect(acceptedSocket!.fd).toBeDefined();
+
+			client.close();
+			acceptedSocket!.close();
+			server.close();
+		});
+	});
+
+	describe("Data Transfer", () => {
+		it("should write data from client to server", () => {
+			const socketPath = path.join(testSocketDir, "transfer-write");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 客户端发送数据
+			const testData = Buffer.from("Hello, Server!");
+			const bytesWritten = client.write(testData);
+			expect(bytesWritten).toBe(testData.length);
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		it("should read data on server from client", () => {
+			const socketPath = path.join(testSocketDir, "transfer-read");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 客户端发送数据
+			const testData = Buffer.from("Hello, Server!");
+			client.write(testData);
+
+			// 等待数据到达并读取
+			let receivedData: Buffer | null = null;
+			const readStartTime = Date.now();
+
+			while (Date.now() - readStartTime < 1000) {
+				receivedData = serverSocket!.read(1024);
+				if (receivedData && receivedData.length > 0) break;
+			}
+
+			expect(receivedData).not.toBeNull();
+			expect(receivedData!.toString()).toBe("Hello, Server!");
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		it("should transfer multiple messages", () => {
+			const socketPath = path.join(testSocketDir, "transfer-multi");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 发送多条消息
+			const messages = ["Message 1", "Message 2", "Message 3"];
+			for (const msg of messages) {
+				client.write(Buffer.from(msg));
+			}
+
+			// 读取所有消息
+			const received: string[] = [];
+			const readStartTime = Date.now();
+
+			while (Date.now() - readStartTime < 1000) {
+				const data = serverSocket!.read(1024);
+				if (data && data.length > 0) {
+					// 可能一次读取到多条消息
+					const fullMessage = data.toString();
+					// 简单分割（假设消息是连续的）
+					received.push(fullMessage);
+				}
+				if (received.join("").length >= messages.join("").length) break;
+			}
+
+			expect(received.join("")).toBe(messages.join(""));
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		it("should transfer large data", () => {
+			const socketPath = path.join(testSocketDir, "transfer-large");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 发送大数据（10KB）
+			const largeData = Buffer.alloc(10240, "A");
+			const bytesWritten = client.write(largeData);
+			expect(bytesWritten).toBe(largeData.length);
+
+			// 读取大数据
+			let receivedData = Buffer.alloc(0);
+			const readStartTime = Date.now();
+
+			while (Date.now() - readStartTime < 1000) {
+				const chunk = serverSocket!.read(4096);
+				if (chunk && chunk.length > 0) {
+					receivedData = Buffer.concat([receivedData, chunk]);
+				}
+				if (receivedData.length >= largeData.length) break;
+			}
+
+			expect(receivedData.length).toBe(largeData.length);
+			expect(receivedData.equals(largeData)).toBe(true);
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		it("should handle bidirectional communication", () => {
+			const socketPath = path.join(testSocketDir, "transfer-bidirectional");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 客户端发送数据到服务器
+			const clientData = Buffer.from("Hello from client");
+			client.write(clientData);
+
+			// 服务器读取
+			let receivedByServer: Buffer | null = null;
+			const readStartTime1 = Date.now();
+
+			while (Date.now() - readStartTime1 < 1000) {
+				receivedByServer = serverSocket!.read(1024);
+				if (receivedByServer && receivedByServer.length > 0) break;
+			}
+
+			expect(receivedByServer!.toString()).toBe("Hello from client");
+
+			// 服务器发送响应到客户端
+			const serverData = Buffer.from("Hello from server");
+			serverSocket!.write(serverData);
+
+			// 客户端读取
+			let receivedByClient: Buffer | null = null;
+			const readStartTime2 = Date.now();
+
+			while (Date.now() - readStartTime2 < 1000) {
+				receivedByClient = client.read(1024);
+				if (receivedByClient && receivedByClient.length > 0) break;
+			}
+
+			expect(receivedByClient!.toString()).toBe("Hello from server");
+
+			client.close();
+			serverSocket!.close();
+			server.close();
+		});
+
+		it("should handle empty buffer", () => {
+			const socketPath = path.join(testSocketDir, "transfer-empty");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const client = new USocket(socketPath);
+
+			// 等待服务器接受连接
+			const startTime = Date.now();
+			let serverSocket: USocket | null = null;
+
+			while (Date.now() - startTime < 1000) {
+				serverSocket = server.accept();
+				if (serverSocket) break;
+			}
+
+			expect(serverSocket).not.toBeNull();
+
+			// 发送空 buffer
+			const emptyData = Buffer.alloc(0);
+			const bytesWritten = client.write(emptyData);
+			expect(bytesWritten).toBe(0);
+
+			client.close();
+			serverSocket!.close();
+			server.close();
 		});
 	});
 });
