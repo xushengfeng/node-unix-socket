@@ -30,7 +30,7 @@
         "./native": "./index.node"
     },
     "author": "",
-    "license": "",
+    "license": "Apache-2.0",
     "devDependencies": {
         "@neon-rs/cli": "0.1.82",
         "@types/node": "^25.5.0",
