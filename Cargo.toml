@@ -12,3 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 neon = "1.1"
+nix = { version = "0.27", features = ["fs", "socket", "uio", "poll"] }
+libc = "0.2"

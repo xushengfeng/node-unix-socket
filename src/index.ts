@@ -1,27 +1,174 @@
 import { createRequire } from 'module';
+import { Duplex } from 'stream';
+import { EventEmitter } from 'events';
+
 const require = createRequire(import.meta.url);
 
-// 导入 Rust 绑定（由 Neon 构建生成）
 const native = require('../index.node');
 
-// 定义 Rust 绑定的接口
 interface NativeModule {
-  hello: (name: string) => string;
+  USocketWrap: () => any;
+  USocketWrap_connect: (wrap: any, path: string) => void;
+  USocketWrap_adopt: (wrap: any, fd: number) => void;
+  USocketWrap_write: (wrap: any, data?: Buffer, fds?: number[]) => number;
+  USocketWrap_read: (wrap: any, size: number) => Buffer;
+  USocketWrap_shutdown: (wrap: any) => void;
+  USocketWrap_close: (wrap: any) => void;
+  UServerWrap: () => any;
+  UServerWrap_listen: (wrap: any, path: string, backlog: number) => void;
+  UServerWrap_accept: (wrap: any) => number | null;
+  UServerWrap_close: (wrap: any) => void;
 }
 
-// 类型断言
 const nativeModule = native as NativeModule;
 
-// 导出 Rust 绑定的函数
-export const hello: (name: string) => string = nativeModule.hello;
-
-// 也可以添加额外的 TypeScript 逻辑
-export function greet(name: string): string {
-  return hello(name);
+export interface USocketOptions {
+  fd?: number;
+  path?: string;
 }
 
-// 默认导出整个模块
+export interface USocketWriteChunk {
+  data?: Buffer;
+  fds?: number[];
+}
+
+export class USocket {
+  fd?: number;
+  private _wrap: any = null;
+  private _fds: number[] = [];
+
+  constructor(opts?: USocketOptions | string) {
+    if (typeof opts === 'string') {
+      opts = { path: opts };
+    }
+    if (opts?.fd || opts?.path) {
+      this.connect(opts);
+    }
+  }
+
+  connect(opts: USocketOptions | string): void {
+    if (this._wrap) {
+      throw new Error('connect on already connected USocket');
+    }
+    if (typeof opts === 'string') {
+      opts = { path: opts };
+    }
+    this._wrap = nativeModule.USocketWrap();
+    this._fds = [];
+    if (typeof opts.fd === 'number') {
+      nativeModule.USocketWrap_adopt(this._wrap, opts.fd);
+      this.fd = opts.fd;
+    } else if (typeof opts.path === 'string') {
+      nativeModule.USocketWrap_connect(this._wrap, opts.path);
+      this.fd = this._wrap._fd;
+    }
+  }
+
+  write(data: Buffer, fds?: number[]): number {
+    if (!this._wrap) {
+      throw new Error('USocket not connected');
+    }
+    return nativeModule.USocketWrap_write(this._wrap, data, fds);
+  }
+
+  read(size: number): Buffer | null {
+    if (!this._wrap) return null;
+    return nativeModule.USocketWrap_read(this._wrap, size);
+  }
+
+  readWithFds(size: number, fdCount: number | null): { data: Buffer | null; fds: number[] } | null {
+    if (!this._wrap) return null;
+    const fdCountToRead = fdCount === null ? this._fds.length : fdCount;
+    if (this._fds.length < fdCountToRead) return null;
+    const data = this.read(size);
+    const fds = this._fds.splice(0, fdCountToRead);
+    return { data, fds };
+  }
+
+  unshift(chunk: Buffer, fds?: number[]): void {
+    if (Array.isArray(fds)) {
+      while (fds.length > 0) {
+        this._fds.unshift(fds.pop()!);
+      }
+    }
+  }
+
+  shutdown(): void {
+    if (!this._wrap) return;
+    nativeModule.USocketWrap_shutdown(this._wrap);
+  }
+
+  close(): void {
+    if (!this._wrap) return;
+    nativeModule.USocketWrap_close(this._wrap);
+    this._wrap = null;
+  }
+}
+
+export class UServer extends EventEmitter {
+  fd?: number;
+  listening: boolean = false;
+  paused: boolean = false;
+  private _wrap: any = null;
+
+  constructor() {
+    super();
+  }
+
+  listen(path: string, backlog?: number, cb?: () => void): void;
+  listen(path: { path: string; backlog?: number }, cb?: () => void): void;
+  listen(path: any, backlog?: any, cb?: any): void {
+    if (this._wrap || this.listening) {
+      throw new Error('listen on already listened UServer');
+    }
+    if (typeof path === 'object') {
+      backlog = path.backlog;
+      path = path.path;
+      cb = backlog;
+    } else if (typeof backlog === 'function') {
+      cb = backlog;
+      backlog = 0;
+    }
+    backlog = backlog || 16;
+    if (typeof path !== 'string') {
+      throw new Error('UServer expects valid path');
+    }
+    if (typeof cb === 'function') {
+      this.once('listening', cb);
+    }
+    this._wrap = nativeModule.UServerWrap();
+    nativeModule.UServerWrap_listen(this._wrap, path, backlog);
+    this.fd = this._wrap._fd;
+    this.listening = true;
+    this.emit('listening');
+    if (!this.paused) {
+      this.resume();
+    }
+  }
+
+  accept(): USocket | null {
+    if (!this._wrap) return null;
+    const fd = nativeModule.UServerWrap_accept(this._wrap);
+    if (fd === null) return null;
+    return new USocket({ fd });
+  }
+
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+  }
+
+  close(): void {
+    if (!this._wrap) return;
+    nativeModule.UServerWrap_close(this._wrap);
+    this._wrap = null;
+  }
+}
+
 export default {
-  hello,
-  greet,
+  USocket,
+  UServer,
 };
