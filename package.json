@@ -1,0 +1,41 @@
+{
+    "name": "unix-socket",
+    "version": "0.1.0",
+    "description": "",
+    "main": "dist/index.cjs",
+    "module": "dist/index.mjs",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build:rust": "npm run cargo-build -- --release",
+        "build:ts": "vite build",
+        "build:types": "tsc --emitDeclarationOnly --outDir dist",
+        "build": "npm run build:rust && npm run build:ts && npm run build:types",
+        "test:rust": "cargo test",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:coverage": "vitest run --coverage",
+        "test:all": "npm run test:rust && npm run test",
+        "cargo-build": "cargo build --message-format=json-render-diagnostics > cargo.log",
+        "cross-build": "cross build --message-format=json-render-diagnostics > cross.log",
+        "postcargo-build": "neon dist < cargo.log",
+        "postcross-build": "neon dist -m /target < cross.log",
+        "debug": "npm run cargo-build --",
+        "cross": "npm run cross-build -- --release"
+    },
+    "exports": {
+        ".": {
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.cjs"
+        },
+        "./native": "./index.node"
+    },
+    "author": "",
+    "license": "",
+    "devDependencies": {
+        "@neon-rs/cli": "0.1.82",
+        "@types/node": "^25.5.0",
+        "typescript": "^5.9.3",
+        "vite": "^8.0.1",
+        "vitest": "^4.1.0"
+    }
+}
