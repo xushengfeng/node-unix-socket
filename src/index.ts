@@ -130,6 +130,7 @@ export class UServer extends EventEmitter {
 	}
 
 	listen(path: string, backlog?: number, cb?: () => void): void;
+	listen(path: string, cb?: () => void): void;
 	listen(path: { path: string; backlog?: number }, cb?: () => void): void;
 	listen(path: any, backlog?: any, cb?: any): void {
 		if (this._wrap || this.listening) {

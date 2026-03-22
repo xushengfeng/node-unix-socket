@@ -116,6 +116,40 @@ describe("Unix Socket Module", () => {
 			server.close();
 		});
 
+		it("should listen with callback (path, cb)", () => {
+			const socketPath = path.join(testSocketDir, "server-cb");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			let callbackCalled = false;
+
+			server.listen(socketPath, () => {
+				callbackCalled = true;
+			});
+
+			expect(callbackCalled).toBe(true);
+			expect(server.listening).toBe(true);
+
+			server.close();
+		});
+
+		it("should listen with backlog and callback", () => {
+			const socketPath = path.join(testSocketDir, "server-backlog-cb");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			let callbackCalled = false;
+
+			server.listen(socketPath, 32, () => {
+				callbackCalled = true;
+			});
+
+			expect(callbackCalled).toBe(true);
+			expect(server.listening).toBe(true);
+
+			server.close();
+		});
+
 		it("should throw error when listening twice", () => {
 			const socketPath1 = path.join(testSocketDir, "server-twice-1");
 			const socketPath2 = path.join(testSocketDir, "server-twice-2");
