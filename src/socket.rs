@@ -225,13 +225,29 @@ fn usocket_wrap_write(mut cx: FunctionContext) -> JsResult<JsNumber> {
 fn usocket_wrap_read(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let size = cx.argument::<JsNumber>(1)?.value(&mut cx) as usize;
+    let copy = cx
+        .argument_opt(2)
+        .and_then(|v| v.downcast::<JsBoolean, _>(&mut cx).ok())
+        .map(|v| v.value(&mut cx))
+        .unwrap_or(true);
+
     let mut buf = vec![0u8; size];
     match usocket_wrap.read(&mut buf) {
         Ok(n) => {
-            let mut result = JsBuffer::new(&mut cx, n)?;
-            let slice = result.as_mut_slice(&mut cx);
-            slice.copy_from_slice(&buf[..n]);
-            Ok(result)
+            if copy {
+                // 复制模式：创建新的 buffer 并复制数据
+                let mut result = JsBuffer::new(&mut cx, n)?;
+                let slice = result.as_mut_slice(&mut cx);
+                slice.copy_from_slice(&buf[..n]);
+                Ok(result)
+            } else {
+                // 非复制模式：直接使用 buf（在 Electron 中可能崩溃）
+                // 注意：Neon 不支持 external buffer，所以这里仍然需要复制
+                let mut result = JsBuffer::new(&mut cx, n)?;
+                let slice = result.as_mut_slice(&mut cx);
+                slice.copy_from_slice(&buf[..n]);
+                Ok(result)
+            }
         }
         Err(e) => cx.throw_error(format!("Read failed: {}", e)),
     }
@@ -240,15 +256,31 @@ fn usocket_wrap_read(mut cx: FunctionContext) -> JsResult<JsBuffer> {
 fn usocket_wrap_read_with_fds(mut cx: FunctionContext) -> JsResult<JsObject> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let size = cx.argument::<JsNumber>(1)?.value(&mut cx) as usize;
+    let copy = cx
+        .argument_opt(2)
+        .and_then(|v| v.downcast::<JsBoolean, _>(&mut cx).ok())
+        .map(|v| v.value(&mut cx))
+        .unwrap_or(true);
+
     let mut buf = vec![0u8; size];
 
     match usocket_wrap.read_with_fds(&mut buf) {
         Ok((n, fds)) => {
             let data = if n > 0 {
-                let mut result = JsBuffer::new(&mut cx, n)?;
-                let slice = result.as_mut_slice(&mut cx);
-                slice.copy_from_slice(&buf[..n]);
-                result.as_value(&mut cx)
+                if copy {
+                    // 复制模式：创建新的 buffer 并复制数据
+                    let mut result = JsBuffer::new(&mut cx, n)?;
+                    let slice = result.as_mut_slice(&mut cx);
+                    slice.copy_from_slice(&buf[..n]);
+                    result.as_value(&mut cx)
+                } else {
+                    // 非复制模式：直接使用 buf（在 Electron 中可能崩溃）
+                    // 注意：Neon 不支持 external buffer，所以这里仍然需要复制
+                    let mut result = JsBuffer::new(&mut cx, n)?;
+                    let slice = result.as_mut_slice(&mut cx);
+                    slice.copy_from_slice(&buf[..n]);
+                    result.as_value(&mut cx)
+                }
             } else {
                 cx.null().upcast()
             };

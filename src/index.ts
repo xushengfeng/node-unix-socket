@@ -8,10 +8,11 @@ interface NativeModule {
 	USocketWrap_connect: (wrap: any, path: string) => number;
 	USocketWrap_adopt: (wrap: any, fd: number) => number;
 	USocketWrap_write: (wrap: any, data?: Buffer, fds?: number[]) => number;
-	USocketWrap_read: (wrap: any, size: number) => Buffer;
+	USocketWrap_read: (wrap: any, size: number, copy?: boolean) => Buffer;
 	USocketWrap_read_with_fds: (
 		wrap: any,
 		size: number,
+		copy?: boolean,
 	) => { data: Buffer | null; fds: number[] };
 	USocketWrap_shutdown: (wrap: any) => void;
 	USocketWrap_close: (wrap: any) => void;
@@ -26,6 +27,12 @@ const nativeModule = native as NativeModule;
 export interface USocketOptions {
 	fd?: number;
 	path?: string;
+	/**
+	 * 是否复制数据，默认为 true。
+	 * 在 Electron 中必须为 true，否则会崩溃。
+	 * 当前版本始终使用复制模式以确保兼容性。
+	 */
+	copy?: boolean;
 }
 
 export interface USocketWriteChunk {
@@ -41,10 +48,14 @@ export interface ReadWithFdsResult {
 export class USocket {
 	fd?: number;
 	private _wrap: any = null;
+	private _copy: boolean = true;
 
 	constructor(opts?: USocketOptions | string) {
 		if (typeof opts === "string") {
 			opts = { path: opts };
+		}
+		if (opts?.copy !== undefined) {
+			this._copy = opts.copy;
 		}
 		if (opts?.fd || opts?.path) {
 			this.connect(opts);
@@ -57,6 +68,9 @@ export class USocket {
 		}
 		if (typeof opts === "string") {
 			opts = { path: opts };
+		}
+		if (opts.copy !== undefined) {
+			this._copy = opts.copy;
 		}
 		this._wrap = nativeModule.USocketWrap();
 		if (typeof opts.fd === "number") {
@@ -75,14 +89,22 @@ export class USocket {
 		return nativeModule.USocketWrap_write(this._wrap, data, fds);
 	}
 
+	/**
+	 * 读取数据
+	 * @param size - 要读取的最大字节数
+	 */
 	read(size: number): Buffer | null {
 		if (!this._wrap) return null;
-		return nativeModule.USocketWrap_read(this._wrap, size);
+		return nativeModule.USocketWrap_read(this._wrap, size, this._copy);
 	}
 
+	/**
+	 * 读取数据和文件描述符
+	 * @param size - 要读取的最大字节数
+	 */
 	readWithFds(size: number): ReadWithFdsResult | null {
 		if (!this._wrap) return null;
-		return nativeModule.USocketWrap_read_with_fds(this._wrap, size);
+		return nativeModule.USocketWrap_read_with_fds(this._wrap, size, this._copy);
 	}
 
 	shutdown(): void {
