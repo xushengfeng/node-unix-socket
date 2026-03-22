@@ -1,7 +1,15 @@
 {
     "name": "myde-unix-socket",
     "version": "0.1.1",
-    "description": "",
+    "description": "unix socket for node",
+    "keywords": [
+        "unix",
+        "socket",
+        "SCM_RIGHTS"
+    ],
+    "repository": {
+        "url": "https://github.com/xushengfeng/node-unix-socket"
+    },
     "main": "dist/index.cjs",
     "module": "dist/index.mjs",
     "types": "dist/index.d.ts",
@@ -34,7 +42,7 @@
         "index.node",
         "README.md"
     ],
-    "author": "",
+    "author": "xushengfeng",
     "license": "Apache-2.0",
     "devDependencies": {
         "@neon-rs/cli": "0.1.82",
