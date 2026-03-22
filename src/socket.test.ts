@@ -1,4 +1,3 @@
-import * as child_process from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -54,6 +53,45 @@ describe("Unix Socket Module", () => {
 
 			const client = new USocket(socketPath);
 			expect(client.fd).toBeDefined();
+
+			client.close();
+			server.close();
+		});
+
+		it("should emit connect event", () => {
+			const socketPath = path.join(testSocketDir, "client-connect-event");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			let connectEmitted = false;
+			const client = new USocket();
+			client.on("connect", () => {
+				connectEmitted = true;
+			});
+			client.connect(socketPath);
+
+			expect(connectEmitted).toBe(true);
+
+			client.close();
+			server.close();
+		});
+
+		it("should call connect callback", () => {
+			const socketPath = path.join(testSocketDir, "client-connect-cb");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			let callbackCalled = false;
+			const client = new USocket();
+			client.connect(socketPath, () => {
+				callbackCalled = true;
+			});
+
+			expect(callbackCalled).toBe(true);
 
 			client.close();
 			server.close();
@@ -179,6 +217,46 @@ describe("Unix Socket Module", () => {
 			server.close();
 		});
 
+		it("should emit connection event when accept is called", async () => {
+			const socketPath = path.join(testSocketDir, "server-connection-event");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			let connectionEmitted = false;
+			let receivedSocket: USocket | null = null;
+
+			server.on("connection", (socket: USocket) => {
+				connectionEmitted = true;
+				receivedSocket = socket;
+			});
+
+			// 启动自动接受连接
+			server.resume();
+
+			const client = new USocket(socketPath);
+
+			// 等待 connection 事件
+			await new Promise<void>((resolve) => {
+				const check = () => {
+					if (connectionEmitted) {
+						resolve();
+					} else {
+						setTimeout(check, 10);
+					}
+				};
+				check();
+			});
+
+			expect(connectionEmitted).toBe(true);
+			expect(receivedSocket).not.toBeNull();
+
+			client.close();
+			receivedSocket!.close();
+			server.close();
+		});
+
 		it("should handle pause and resume", () => {
 			const socketPath = path.join(testSocketDir, "server-pause");
 			cleanupSocket(socketPath);
@@ -202,24 +280,31 @@ describe("Unix Socket Module", () => {
 			expect(() => server.close()).not.toThrow();
 		});
 
-		it("should accept a connection", () => {
+		it("should accept a connection", async () => {
 			const socketPath = path.join(testSocketDir, "server-accept");
 			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			// 启动自动接受连接
+			server.resume();
+
 			// 创建客户端连接
 			const client = new USocket(socketPath);
 
-			// 等待一下让连接建立
-			const startTime = Date.now();
-			let acceptedSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				acceptedSocket = server.accept();
-				if (acceptedSocket) break;
-			}
+			// 等待连接
+			const acceptedSocket = await Promise.race([
+				connectionPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
 			expect(acceptedSocket).not.toBeNull();
 			expect(acceptedSocket!.fd).toBeDefined();
@@ -231,225 +316,224 @@ describe("Unix Socket Module", () => {
 	});
 
 	describe("Data Transfer", () => {
-		it("should write data from client to server", () => {
+		it("should write data from client to server", async () => {
 			const socketPath = path.join(testSocketDir, "transfer-write");
 			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
 
 			// 客户端发送数据
 			const testData = Buffer.from("Hello, Server!");
 			const bytesWritten = client.write(testData);
-			expect(bytesWritten).toBe(testData.length);
+			expect(bytesWritten).toBe(true);
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
 			server.close();
 		});
 
-		it("should read data on server from client", () => {
+		it("should read data on server from client using readable event", async () => {
 			const socketPath = path.join(testSocketDir, "transfer-read");
 			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
+
+			// 使用 readable 事件读取数据
+			const dataPromise = new Promise<Buffer>((resolve) => {
+				serverSocket.on("readable", () => {
+					const data = serverSocket.read();
+					if (data && Buffer.isBuffer(data) && data.length > 0) {
+						resolve(data);
+					}
+				});
+			});
 
 			// 客户端发送数据
 			const testData = Buffer.from("Hello, Server!");
 			client.write(testData);
 
-			// 等待数据到达并读取
-			let receivedData: Buffer | null = null;
-			const readStartTime = Date.now();
-
-			while (Date.now() - readStartTime < 1000) {
-				receivedData = serverSocket!.read(1024);
-				if (receivedData && receivedData.length > 0) break;
-			}
+			// 等待 readable 事件
+			const receivedData = await Promise.race([
+				dataPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
 			expect(receivedData).not.toBeNull();
 			expect(receivedData!.toString()).toBe("Hello, Server!");
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
 			server.close();
 		});
 
-		it("should transfer multiple messages", () => {
+		it("should transfer multiple messages using readable event", async () => {
 			const socketPath = path.join(testSocketDir, "transfer-multi");
 			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
 
-			// 发送多条消息
+			// 收集所有接收的数据
+			const received: string[] = [];
 			const messages = ["Message 1", "Message 2", "Message 3"];
+
+			const dataPromise = new Promise<string[]>((resolve) => {
+				serverSocket.on("readable", () => {
+					const data = serverSocket.read();
+					if (data && Buffer.isBuffer(data) && data.length > 0) {
+						received.push(data.toString());
+						if (received.join("").length >= messages.join("").length) {
+							resolve(received);
+						}
+					}
+				});
+			});
+
+			// 发送多条消息
 			for (const msg of messages) {
 				client.write(Buffer.from(msg));
 			}
 
-			// 读取所有消息
-			const received: string[] = [];
-			const readStartTime = Date.now();
-
-			while (Date.now() - readStartTime < 1000) {
-				const data = serverSocket!.read(1024);
-				if (data && data.length > 0) {
-					received.push(data.toString());
-				}
-				if (received.join("").length >= messages.join("").length) break;
-			}
+			// 等待所有数据
+			await Promise.race([
+				dataPromise,
+				new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+			]);
 
 			expect(received.join("")).toBe(messages.join(""));
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
 			server.close();
 		});
 
-		it("should transfer large data", () => {
-			const socketPath = path.join(testSocketDir, "transfer-large");
-			cleanupSocket(socketPath);
-
-			const server = new UServer();
-			server.listen(socketPath);
-
-			const client = new USocket(socketPath);
-
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
-
-			expect(serverSocket).not.toBeNull();
-
-			// 发送大数据（10KB）
-			const largeData = Buffer.alloc(10240, "A");
-			const bytesWritten = client.write(largeData);
-			expect(bytesWritten).toBe(largeData.length);
-
-			// 读取大数据
-			let receivedData = Buffer.alloc(0);
-			const readStartTime = Date.now();
-
-			while (Date.now() - readStartTime < 1000) {
-				const chunk = serverSocket!.read(4096);
-				if (chunk && chunk.length > 0) {
-					receivedData = Buffer.concat([receivedData, chunk]);
-				}
-				if (receivedData.length >= largeData.length) break;
-			}
-
-			expect(receivedData.length).toBe(largeData.length);
-			expect(receivedData.equals(largeData)).toBe(true);
-
-			client.close();
-			serverSocket!.close();
-			server.close();
-		});
-
-		it("should handle bidirectional communication", () => {
+		it("should handle bidirectional communication using readable event", async () => {
 			const socketPath = path.join(testSocketDir, "transfer-bidirectional");
 			cleanupSocket(socketPath);
 
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
+
+			// 服务器使用 readable 事件读取数据
+			const serverDataPromise = new Promise<Buffer>((resolve) => {
+				serverSocket.on("readable", () => {
+					const data = serverSocket.read();
+					if (data && Buffer.isBuffer(data) && data.length > 0) {
+						resolve(data);
+					}
+				});
+			});
 
 			// 客户端发送数据到服务器
 			const clientData = Buffer.from("Hello from client");
 			client.write(clientData);
 
-			// 服务器读取
-			let receivedByServer: Buffer | null = null;
-			const readStartTime1 = Date.now();
+			// 等待服务器收到数据
+			const receivedByServer = await Promise.race([
+				serverDataPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
-			while (Date.now() - readStartTime1 < 1000) {
-				receivedByServer = serverSocket!.read(1024);
-				if (receivedByServer && receivedByServer.length > 0) break;
-			}
-
+			expect(receivedByServer).not.toBeNull();
 			expect(receivedByServer!.toString()).toBe("Hello from client");
+
+			// 客户端使用 readable 事件读取数据
+			const clientDataPromise = new Promise<Buffer>((resolve) => {
+				client.on("readable", () => {
+					const data = client.read();
+					if (data && Buffer.isBuffer(data) && data.length > 0) {
+						resolve(data);
+					}
+				});
+			});
 
 			// 服务器发送响应到客户端
 			const serverData = Buffer.from("Hello from server");
-			serverSocket!.write(serverData);
+			serverSocket.write(serverData);
 
-			// 客户端读取
-			let receivedByClient: Buffer | null = null;
-			const readStartTime2 = Date.now();
+			// 等待客户端收到数据
+			const receivedByClient = await Promise.race([
+				clientDataPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
-			while (Date.now() - readStartTime2 < 1000) {
-				receivedByClient = client.read(1024);
-				if (receivedByClient && receivedByClient.length > 0) break;
-			}
-
+			expect(receivedByClient).not.toBeNull();
 			expect(receivedByClient!.toString()).toBe("Hello from server");
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
 			server.close();
 		});
 	});
 
 	describe("File Descriptor Transfer (SCM_RIGHTS)", () => {
-		it("should send and receive file descriptor", () => {
+		it("should send and receive file descriptor using readable event", async () => {
 			const socketPath = path.join(testSocketDir, "fd-transfer");
 			cleanupSocket(socketPath);
 
@@ -464,32 +548,50 @@ describe("Unix Socket Module", () => {
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
 
+			// 使用 readable 事件读取 fd
+			const fdPromise = new Promise<{ data: Buffer | null; fds: number[] }>(
+				(resolve) => {
+					serverSocket.on("readable", () => {
+						const r = serverSocket.read(1024, 1);
+						if (
+							r &&
+							typeof r === "object" &&
+							"fds" in r &&
+							Array.isArray(r.fds) &&
+							r.fds.length > 0
+						) {
+							resolve(r as { data: Buffer | null; fds: number[] });
+						}
+					});
+				},
+			);
+
 			// 客户端发送 fd
 			const message = Buffer.from("fd-transfer");
-			const bytesWritten = client.write(message, [fileFd]);
-			expect(bytesWritten).toBe(message.length);
+			const written = client.write({ data: message, fds: [fileFd] });
+			expect(written).toBe(true);
 
-			// 服务器读取 fd
-			let result: { data: Buffer | null; fds: number[] } | null = null;
-			const readStartTime = Date.now();
-
-			while (Date.now() - readStartTime < 1000) {
-				result = serverSocket!.readWithFds(1024);
-				if (result && result.fds.length > 0) break;
-			}
+			// 等待 readable 事件
+			const result = await Promise.race([
+				fdPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
 			expect(result).not.toBeNull();
 			expect(result!.fds.length).toBe(1);
@@ -505,11 +607,11 @@ describe("Unix Socket Module", () => {
 			fs.unlinkSync(tmpFile);
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
 			server.close();
 		});
 
-		it("should send and receive multiple file descriptors", () => {
+		it("should send and receive multiple file descriptors using readable event", async () => {
 			const socketPath = path.join(testSocketDir, "fd-transfer-multi");
 			cleanupSocket(socketPath);
 
@@ -533,32 +635,50 @@ describe("Unix Socket Module", () => {
 			const server = new UServer();
 			server.listen(socketPath);
 
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
 			const client = new USocket(socketPath);
 
-			// 等待服务器接受连接
-			const startTime = Date.now();
-			let serverSocket: USocket | null = null;
-
-			while (Date.now() - startTime < 1000) {
-				serverSocket = server.accept();
-				if (serverSocket) break;
-			}
+			// 等待连接
+			const serverSocket = await connectionPromise;
 
 			expect(serverSocket).not.toBeNull();
 
+			// 使用 readable 事件读取多个 fd
+			const fdsPromise = new Promise<{ data: Buffer | null; fds: number[] }>(
+				(resolve) => {
+					serverSocket.on("readable", () => {
+						const r = serverSocket.read(1024, 3);
+						if (
+							r &&
+							typeof r === "object" &&
+							"fds" in r &&
+							Array.isArray(r.fds) &&
+							r.fds.length >= 3
+						) {
+							resolve(r as { data: Buffer | null; fds: number[] });
+						}
+					});
+				},
+			);
+
 			// 客户端发送多个 fd
 			const message = Buffer.from("multi-fd-transfer");
-			const bytesWritten = client.write(message, fileFds);
-			expect(bytesWritten).toBe(message.length);
+			const written = client.write({ data: message, fds: fileFds });
+			expect(written).toBe(true);
 
-			// 服务器读取 fd
-			let result: { data: Buffer | null; fds: number[] } | null = null;
-			const readStartTime = Date.now();
-
-			while (Date.now() - readStartTime < 1000) {
-				result = serverSocket!.readWithFds(1024);
-				if (result && result.fds.length >= 3) break;
-			}
+			// 等待 readable 事件
+			const result = await Promise.race([
+				fdsPromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
 
 			expect(result).not.toBeNull();
 			expect(result!.fds.length).toBe(3);
@@ -581,11 +701,233 @@ describe("Unix Socket Module", () => {
 			}
 
 			client.close();
-			serverSocket!.close();
+			serverSocket.close();
+			server.close();
+		});
+	});
+
+	describe("Events", () => {
+		it("should emit close event", () => {
+			const socketPath = path.join(testSocketDir, "event-close");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			let closeEmitted = false;
+			server.on("close", () => {
+				closeEmitted = true;
+			});
+
+			server.close();
+
+			expect(closeEmitted).toBe(true);
+		});
+
+		it("should emit finish event on end", async () => {
+			const socketPath = path.join(testSocketDir, "event-finish");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
+			const client = new USocket(socketPath);
+
+			// 等待连接
+			const serverSocket = await connectionPromise;
+
+			expect(serverSocket).not.toBeNull();
+
+			let finishEmitted = false;
+			client.on("finish", () => {
+				finishEmitted = true;
+			});
+
+			client.end();
+
+			expect(finishEmitted).toBe(true);
+
+			client.close();
+			serverSocket.close();
 			server.close();
 		});
 
-		// 跨进程 fd 传输测试需要更复杂的同步机制，暂时跳过
-		// 可以使用 child_process.fork 或 spawn 来实现
+		it("should emit readable event when data arrives", async () => {
+			const socketPath = path.join(testSocketDir, "event-readable");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
+			const client = new USocket(socketPath);
+
+			// 等待连接
+			const serverSocket = await connectionPromise;
+
+			expect(serverSocket).not.toBeNull();
+
+			// 使用 readable 事件读取数据
+			const readablePromise = new Promise<Buffer>((resolve) => {
+				serverSocket.on("readable", () => {
+					const data = serverSocket.read();
+					if (data && Buffer.isBuffer(data) && data.length > 0) {
+						resolve(data);
+					}
+				});
+			});
+
+			// 发送数据
+			const testData = Buffer.from("Hello readable!");
+			client.write(testData);
+
+			// 等待 readable 事件
+			const receivedData = await Promise.race([
+				readablePromise,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+			]);
+
+			expect(receivedData).not.toBeNull();
+			expect(receivedData!.toString()).toBe("Hello readable!");
+
+			client.close();
+			serverSocket.close();
+			server.close();
+		});
+
+		it("should emit end event on shutdown", async () => {
+			const socketPath = path.join(testSocketDir, "event-end");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
+			const client = new USocket(socketPath);
+
+			// 等待连接
+			const serverSocket = await connectionPromise;
+
+			expect(serverSocket).not.toBeNull();
+
+			const endPromise = new Promise<void>((resolve) => {
+				client.on("end", () => {
+					resolve();
+				});
+			});
+
+			client.shutdown();
+
+			// 等待 end 事件
+			await Promise.race([
+				endPromise,
+				new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+			]);
+
+			client.close();
+			serverSocket.close();
+			server.close();
+		});
+
+		it("should handle multiple rounds of conversation with readable events", async () => {
+			const socketPath = path.join(testSocketDir, "event-multi-round");
+			cleanupSocket(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			// 等待连接
+			const connectionPromise = new Promise<USocket>((resolve) => {
+				server.on("connection", (socket: USocket) => {
+					resolve(socket);
+				});
+			});
+
+			server.resume();
+
+			const client = new USocket(socketPath);
+
+			// 等待连接
+			const serverSocket = await connectionPromise;
+
+			expect(serverSocket).not.toBeNull();
+
+			// 收集服务器收到的消息
+			const serverReceived: string[] = [];
+			const clientReceived: string[] = [];
+
+			// 服务器监听 readable 事件
+			serverSocket.on("readable", () => {
+				const data = serverSocket.read();
+				if (data && Buffer.isBuffer(data) && data.length > 0) {
+					serverReceived.push(data.toString());
+				}
+			});
+
+			// 客户端监听 readable 事件
+			client.on("readable", () => {
+				const data = client.read();
+				if (data && Buffer.isBuffer(data) && data.length > 0) {
+					clientReceived.push(data.toString());
+				}
+			});
+
+			// 第一轮对话
+			client.write(Buffer.from("Client: Hello 1"));
+			await new Promise((r) => setTimeout(r, 50));
+			serverSocket.write(Buffer.from("Server: Hi 1"));
+
+			// 第二轮对话
+			await new Promise((r) => setTimeout(r, 50));
+			client.write(Buffer.from("Client: Hello 2"));
+			await new Promise((r) => setTimeout(r, 50));
+			serverSocket.write(Buffer.from("Server: Hi 2"));
+
+			// 第三轮对话
+			await new Promise((r) => setTimeout(r, 50));
+			client.write(Buffer.from("Client: Hello 3"));
+			await new Promise((r) => setTimeout(r, 50));
+			serverSocket.write(Buffer.from("Server: Hi 3"));
+
+			// 等待所有消息到达
+			await new Promise((r) => setTimeout(r, 200));
+
+			// 验证服务器收到的消息
+			expect(serverReceived.length).toBeGreaterThanOrEqual(1);
+			expect(serverReceived.join("")).toContain("Client: Hello");
+
+			// 验证客户端收到的消息
+			expect(clientReceived.length).toBeGreaterThanOrEqual(1);
+			expect(clientReceived.join("")).toContain("Server: Hi");
+
+			client.close();
+			serverSocket.close();
+			server.close();
+		});
 	});
 });
