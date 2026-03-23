@@ -692,4 +692,50 @@ describe("Unix Socket Module", () => {
 			server.close();
 		});
 	});
+	describe("other test", () => {
+		it("case1", async () => {
+			const socketPath = path.join(testSocketDir, "other-case1");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			const m = Array.from({ length: 4 })
+				.fill(0)
+				.map((_) => Math.random().toString(36).slice(2, 8));
+			const re = [...m];
+			serverSocket.on("data", (data) => {
+				const str = data
+					.toString()
+					.split(",")
+					.filter((s) => s);
+				for (const s of str) {
+					const num = parseInt(s);
+					if (num === 4 || num === 10 || num === 13 || num === 25) {
+						console.log("w");
+						serverSocket.write(Buffer.from(m.shift()!));
+					}
+				}
+			});
+			const received: string[] = [];
+			client.on("data", (data) => {
+				const str = data.toString();
+				received.push(str);
+			});
+			for (let i = 1; i <= 25; i++) {
+				client.write(Buffer.from(String(i) + ","));
+				// await wait(10);
+			}
+			await wait(500);
+			expect(received).toEqual(re);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+	});
 });
