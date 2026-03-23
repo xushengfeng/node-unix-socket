@@ -165,8 +165,6 @@ export class USocket extends Duplex {
 			if (data && Buffer.isBuffer(data) && data.length > 0) {
 				// 触发 data 事件
 				this.emit("data", data, fds || []);
-				// 也推送到流中
-				this.push(data);
 			} else if (!data || (Buffer.isBuffer(data) && data.length === 0)) {
 				if (!this._endReceived) {
 					// 连接关闭

@@ -12,11 +12,13 @@ describe("Unix Socket Module", () => {
 	}
 
 	function cleanup(socketPath: string) {
-		try { fs.unlinkSync(socketPath); } catch {}
+		try {
+			fs.unlinkSync(socketPath);
+		} catch {}
 	}
 
 	function wait(ms: number) {
-		return new Promise(r => setTimeout(r, ms));
+		return new Promise((r) => setTimeout(r, ms));
 	}
 
 	async function waitForConnection(server: UServer): Promise<USocket> {
@@ -105,7 +107,9 @@ describe("Unix Socket Module", () => {
 			server.listen(socketPath);
 
 			const client = new USocket(socketPath);
-			expect(() => client.connect(socketPath)).toThrow("connect on already connected USocket");
+			expect(() => client.connect(socketPath)).toThrow(
+				"connect on already connected USocket",
+			);
 
 			client.destroy();
 			server.close();
@@ -140,7 +144,9 @@ describe("Unix Socket Module", () => {
 
 			const server = new UServer();
 			let eventEmitted = false;
-			server.on("listening", () => { eventEmitted = true; });
+			server.on("listening", () => {
+				eventEmitted = true;
+			});
 			server.listen(socketPath);
 
 			expect(eventEmitted).toBe(true);
@@ -154,7 +160,9 @@ describe("Unix Socket Module", () => {
 
 			const server = new UServer();
 			let callbackCalled = false;
-			server.listen(socketPath, () => { callbackCalled = true; });
+			server.listen(socketPath, () => {
+				callbackCalled = true;
+			});
 
 			expect(callbackCalled).toBe(true);
 			expect(server.listening).toBe(true);
@@ -168,7 +176,9 @@ describe("Unix Socket Module", () => {
 
 			const server = new UServer();
 			let callbackCalled = false;
-			server.listen(socketPath, 32, () => { callbackCalled = true; });
+			server.listen(socketPath, 32, () => {
+				callbackCalled = true;
+			});
 
 			expect(callbackCalled).toBe(true);
 			expect(server.listening).toBe(true);
@@ -185,7 +195,9 @@ describe("Unix Socket Module", () => {
 			const server = new UServer();
 			server.listen(socketPath1);
 
-			expect(() => server.listen(socketPath2)).toThrow("listen on already listened UServer");
+			expect(() => server.listen(socketPath2)).toThrow(
+				"listen on already listened UServer",
+			);
 
 			server.close();
 		});
@@ -250,10 +262,88 @@ describe("Unix Socket Module", () => {
 			const dataPromise = waitForData(serverSocket);
 			client.write(Buffer.from("Hello, Server!"));
 
-			const receivedData = await Promise.race([dataPromise, wait(1000).then(() => null)]);
+			const receivedData = await Promise.race([
+				dataPromise,
+				wait(1000).then(() => null),
+			]);
 
 			expect(receivedData).not.toBeNull();
 			expect(receivedData!.toString()).toBe("Hello, Server!");
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should send multiple messages from client to server", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-multi-client");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			let received = "";
+			serverSocket.on("data", (data: Buffer) => (received += data.toString()));
+
+			// 发送多条带随机数的消息
+			const msg1 = `msg1-${Math.random().toString(36).slice(2)}`;
+			const msg2 = `msg2-${Math.random().toString(36).slice(2)}`;
+			const msg3 = `msg3-${Math.random().toString(36).slice(2)}`;
+
+			client.write(Buffer.from(msg1));
+			client.write(Buffer.from(msg2));
+			client.write(Buffer.from(msg3));
+
+			// 等待数据到达
+			while (received.length < (msg1 + msg2 + msg3).length) {
+				await wait(10);
+			}
+
+			// 严格验证拼接后的结果
+			expect(received).toBe(msg1 + msg2 + msg3);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should send multiple messages from server to client", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-multi-server");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			let received = "";
+			client.on("data", (data: Buffer) => (received += data.toString()));
+
+			// 服务器发送多条带随机数的消息
+			const msg1 = `srv1-${Math.random().toString(36).slice(2).repeat(5)}`;
+			const msg2 = `srv2-${Math.random().toString(36).slice(2).repeat(5)}`;
+			const msg3 = `srv3-${Math.random().toString(36).slice(2).repeat(5)}`;
+
+			serverSocket.write(Buffer.from(msg1));
+			await wait(10);
+			serverSocket.write(Buffer.from(msg2));
+			await wait(10);
+			serverSocket.write(Buffer.from(msg3));
+			await wait(10);
+
+			// 等待数据到达
+			while (received.length < (msg1 + msg2 + msg3).length) {
+				await wait(10);
+			}
+
+			// 严格验证拼接后的结果
+			expect(received).toBe(msg1 + msg2 + msg3);
 
 			client.destroy();
 			serverSocket.destroy();
@@ -273,19 +363,209 @@ describe("Unix Socket Module", () => {
 
 			// 客户端 -> 服务器
 			const serverDataPromise = waitForData(serverSocket);
-			client.write(Buffer.from("Hello from client"));
-			const receivedByServer = await Promise.race([serverDataPromise, wait(1000).then(() => null)]);
+			const clientMsg = `client-${Math.random().toString(36).slice(2)}`;
+			client.write(Buffer.from(clientMsg));
+			const receivedByServer = await Promise.race([
+				serverDataPromise,
+				wait(1000).then(() => null),
+			]);
 
 			expect(receivedByServer).not.toBeNull();
-			expect(receivedByServer!.toString()).toBe("Hello from client");
+			expect(receivedByServer!.toString()).toBe(clientMsg);
 
 			// 服务器 -> 客户端
 			const clientDataPromise = waitForData(client);
-			serverSocket.write(Buffer.from("Hello from server"));
-			const receivedByClient = await Promise.race([clientDataPromise, wait(1000).then(() => null)]);
+			const serverMsg = `server-${Math.random().toString(36).slice(2)}`;
+			serverSocket.write(Buffer.from(serverMsg));
+			const receivedByClient = await Promise.race([
+				clientDataPromise,
+				wait(1000).then(() => null),
+			]);
 
 			expect(receivedByClient).not.toBeNull();
-			expect(receivedByClient!.toString()).toBe("Hello from server");
+			expect(receivedByClient!.toString()).toBe(serverMsg);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should handle round-trip counter", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-counter");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			const maxCount = 10;
+			let lastServerReceived = -1;
+			let lastClientReceived = -1;
+
+			// 服务器收到 N 后回复 N+1
+			serverSocket.on("data", (data: Buffer) => {
+				const n = parseInt(data.toString());
+				lastServerReceived = n;
+				if (n < maxCount) {
+					serverSocket.write(Buffer.from(String(n + 1)));
+				}
+			});
+
+			// 客户端收到 N 后发送 N+1
+			client.on("data", (data: Buffer) => {
+				const n = parseInt(data.toString());
+				lastClientReceived = n;
+				if (n < maxCount) {
+					client.write(Buffer.from(String(n + 1)));
+				}
+			});
+
+			// 开始：客户端发送 0
+			client.write(Buffer.from("0"));
+
+			// 等待完成
+			const startTime = Date.now();
+			while (lastServerReceived < maxCount && Date.now() - startTime < 1000) {
+				await wait(10);
+			}
+
+			// 验证计数器正确累加
+			// 服务器收到 10 后停止回复，客户端收到 9
+			expect(lastServerReceived).toBe(maxCount);
+			expect(lastClientReceived).toBe(maxCount - 1);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should handle bidirectional counter", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-bidi-counter");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			const maxCount = 10;
+			const counts: number[] = [];
+
+			// 服务器收到数字后累加并回复自己的累加值
+			serverSocket.on("data", (data: Buffer) => {
+				const n = parseInt(data.toString());
+				counts.push(n);
+				if (n < maxCount) serverSocket.write(Buffer.from(String(n + 1)));
+			});
+
+			// 客户端收到数字后累加并发送新数字
+			client.on("data", (data: Buffer) => {
+				const n = parseInt(data.toString());
+				counts.push(n);
+				if (n < maxCount) {
+					client.write(Buffer.from(String(n + 1)));
+				}
+			});
+
+			client.write(Buffer.from(String(1)));
+			await wait(20);
+
+			await wait(100);
+
+			expect(counts).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should handle interleaved sends", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-interleaved");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			let serverReceived = "";
+			let clientReceived = "";
+
+			serverSocket.on(
+				"data",
+				(data: Buffer) => (serverReceived += data.toString()),
+			);
+			client.on("data", (data: Buffer) => (clientReceived += data.toString()));
+
+			// 交替发送带随机数的消息
+			const c1 = `c1-${Math.random().toString(36).slice(2, 6)}`;
+			const s1 = `s1-${Math.random().toString(36).slice(2, 6)}`;
+			const c2 = `c2-${Math.random().toString(36).slice(2, 6)}`;
+			const s2 = `s2-${Math.random().toString(36).slice(2, 6)}`;
+
+			client.write(Buffer.from(c1));
+			serverSocket.write(Buffer.from(s1));
+			client.write(Buffer.from(c2));
+			serverSocket.write(Buffer.from(s2));
+
+			// 等待数据到达
+			const expectedServer = c1 + c2;
+			const expectedClient = s1 + s2;
+			while (
+				serverReceived.length < expectedServer.length ||
+				clientReceived.length < expectedClient.length
+			) {
+				await wait(10);
+			}
+
+			// 严格验证拼接后的结果
+			expect(serverReceived).toBe(expectedServer);
+			expect(clientReceived).toBe(expectedClient);
+
+			client.destroy();
+			serverSocket.destroy();
+			server.close();
+		});
+
+		it("should handle large data transfer", async () => {
+			const socketPath = path.join(testSocketDir, "transfer-large");
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+
+			const serverSocketPromise = waitForConnection(server);
+			const client = new USocket(socketPath);
+			const serverSocket = await serverSocketPromise;
+
+			// 生成 32KB 随机数据
+			const largeData = Buffer.alloc(32 * 1024);
+			for (let i = 0; i < largeData.length; i++) {
+				largeData[i] = Math.floor(Math.random() * 256);
+			}
+
+			let received = Buffer.alloc(0);
+			serverSocket.on("data", (data: Buffer) => {
+				received = Buffer.concat([received, data]);
+			});
+
+			client.write(largeData);
+
+			// 等待所有数据到达
+			while (received.length < largeData.length) {
+				await wait(10);
+			}
+
+			// 严格验证数据完全一致
+			expect(received.length).toBe(largeData.length);
+			expect(received.equals(largeData)).toBe(true);
 
 			client.destroy();
 			serverSocket.destroy();
@@ -302,7 +582,9 @@ describe("Unix Socket Module", () => {
 			server.listen(socketPath);
 
 			let closeEmitted = false;
-			server.on("close", () => { closeEmitted = true; });
+			server.on("close", () => {
+				closeEmitted = true;
+			});
 			server.close();
 
 			expect(closeEmitted).toBe(true);
@@ -325,7 +607,12 @@ describe("Unix Socket Module", () => {
 
 			client.end();
 
-			await Promise.race([finishPromise, wait(1000).then(() => { throw new Error("Timeout"); })]);
+			await Promise.race([
+				finishPromise,
+				wait(1000).then(() => {
+					throw new Error("Timeout");
+				}),
+			]);
 
 			client.destroy();
 			server.close();
@@ -345,7 +632,10 @@ describe("Unix Socket Module", () => {
 			const dataPromise = waitForData(serverSocket);
 			client.write(Buffer.from("Hello data!"));
 
-			const receivedData = await Promise.race([dataPromise, wait(1000).then(() => null)]);
+			const receivedData = await Promise.race([
+				dataPromise,
+				wait(1000).then(() => null),
+			]);
 
 			expect(receivedData).not.toBeNull();
 			expect(receivedData!.toString()).toBe("Hello data!");
@@ -366,28 +656,36 @@ describe("Unix Socket Module", () => {
 			const client = new USocket(socketPath);
 			const serverSocket = await serverSocketPromise;
 
-			const serverReceived: string[] = [];
-			const clientReceived: string[] = [];
+			let serverReceived = "";
+			let clientReceived = "";
 
-			serverSocket.on("data", (data) => { serverReceived.push(data.toString()); });
-			client.on("data", (data) => { clientReceived.push(data.toString()); });
+			serverSocket.on("data", (data) => (serverReceived += data.toString()));
+			client.on("data", (data) => (clientReceived += data.toString()));
 
-			client.write(Buffer.from("Client: Hello 1"));
-			await wait(50);
-			serverSocket.write(Buffer.from("Server: Hi 1"));
+			// 发送带随机数的消息
+			const clientMsg1 = `c1-${Math.random().toString(36).slice(2, 8)}`;
+			const serverMsg1 = `s1-${Math.random().toString(36).slice(2, 8)}`;
+			const clientMsg2 = `c2-${Math.random().toString(36).slice(2, 8)}`;
+			const serverMsg2 = `s2-${Math.random().toString(36).slice(2, 8)}`;
 
-			await wait(50);
-			client.write(Buffer.from("Client: Hello 2"));
-			await wait(50);
-			serverSocket.write(Buffer.from("Server: Hi 2"));
+			client.write(Buffer.from(clientMsg1));
+			serverSocket.write(Buffer.from(serverMsg1));
+			client.write(Buffer.from(clientMsg2));
+			serverSocket.write(Buffer.from(serverMsg2));
 
-			await wait(200);
+			// 等待所有数据到达
+			const expectedServer = clientMsg1 + clientMsg2;
+			const expectedClient = serverMsg1 + serverMsg2;
+			while (
+				serverReceived.length < expectedServer.length ||
+				clientReceived.length < expectedClient.length
+			) {
+				await wait(10);
+			}
 
-			expect(serverReceived.length).toBeGreaterThanOrEqual(1);
-			expect(serverReceived.join("")).toContain("Client: Hello");
-
-			expect(clientReceived.length).toBeGreaterThanOrEqual(1);
-			expect(clientReceived.join("")).toContain("Server: Hi");
+			// 严格验证拼接后的结果
+			expect(serverReceived).toBe(expectedServer);
+			expect(clientReceived).toBe(expectedClient);
 
 			client.destroy();
 			serverSocket.destroy();
