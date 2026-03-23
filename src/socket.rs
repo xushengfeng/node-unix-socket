@@ -160,11 +160,15 @@ impl USocketWrap {
                                 }
 
                                 // 消耗回调并调用
-                                let cb = callback.lock().unwrap().take();
-                                if let Some(cb) = cb {
-                                    channel.send(move |mut cx| {
-                                        let this = cx.undefined();
-                                        let func = cb.into_inner(&mut cx);
+                                let callback_clone = callback.clone();
+                                channel.send(move |mut cx| {
+                                    let this = cx.undefined();
+                                    let func = {
+                                        let lock = callback_clone.lock().unwrap();
+                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                                    };
+                                    if let Some(func) = func {
+                                        
                                         let event = cx.string("data");
 
                                         let data = if n > 0 {
@@ -187,38 +191,49 @@ impl USocketWrap {
                                             this,
                                             [event.upcast(), data, fds_array.upcast()],
                                         )?;
-                                        Ok(())
-                                    });
-                                }
+                                        
+                                    }
+                                    Ok(())
+                                });
                             }
                             Err(_) => {
                                 // 读取失败，可能是连接关闭
-                                let cb = callback.lock().unwrap().take();
-                                if let Some(cb) = cb {
-                                    channel.send(move |mut cx| {
-                                        let this = cx.undefined();
-                                        let func = cb.into_inner(&mut cx);
+                                let callback_clone = callback.clone();
+                                channel.send(move |mut cx| {
+                                    let this = cx.undefined();
+                                    let func = {
+                                        let lock = callback_clone.lock().unwrap();
+                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                                    };
+                                    if let Some(func) = func {
+                                        
                                         let event = cx.string("end");
                                         func.call(&mut cx, this, [event.upcast()])?;
-                                        Ok(())
-                                    });
-                                }
+                                        
+                                    }
+                                    Ok(())
+                                });
                                 break;
                             }
                         }
                     }
 
                     if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                        let cb = callback.lock().unwrap().take();
-                        if let Some(cb) = cb {
-                            channel.send(move |mut cx| {
-                                let this = cx.undefined();
-                                let func = cb.into_inner(&mut cx);
+                        let callback_clone = callback.clone();
+                                channel.send(move |mut cx| {
+                                    let this = cx.undefined();
+                                    let func = {
+                                        let lock = callback_clone.lock().unwrap();
+                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                                    };
+                                    if let Some(func) = func {
+                                        
                                 let event = cx.string("end");
                                 func.call(&mut cx, this, [event.upcast()])?;
-                                Ok(())
-                            });
-                        }
+                                
+                                    }
+                                    Ok(())
+                                });
                         break;
                     }
                 }
@@ -331,17 +346,22 @@ impl UServerWrap {
                 };
 
                 if client_fd >= 0 {
-                    let cb = callback.lock().unwrap().take();
-                    if let Some(cb) = cb {
-                        channel.send(move |mut cx| {
-                            let this = cx.undefined();
-                            let func = cb.into_inner(&mut cx);
+                    let callback_clone = callback.clone();
+                                channel.send(move |mut cx| {
+                                    let this = cx.undefined();
+                                    let func = {
+                                        let lock = callback_clone.lock().unwrap();
+                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                                    };
+                                    if let Some(func) = func {
+                                        
                             let event = cx.string("accept");
                             let fd_val = cx.number(client_fd as f64);
                             func.call(&mut cx, this, [event.upcast(), fd_val.upcast()])?;
-                            Ok(())
-                        });
-                    }
+                            
+                                    }
+                                    Ok(())
+                                });
                 }
             }
         });
