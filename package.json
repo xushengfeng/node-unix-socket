@@ -1,6 +1,6 @@
 {
     "name": "myde-unix-socket",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "description": "unix socket for node",
     "keywords": [
         "unix",
