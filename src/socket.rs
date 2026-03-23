@@ -1,7 +1,7 @@
 use neon::prelude::*;
 use neon::types::buffer::TypedArray;
 use std::cell::RefCell;
-use std::io::{self, IoSlice, IoSliceMut, Read};
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,13 +10,14 @@ use std::thread;
 
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr};
 
+// USocketWrap - 客户端 socket 包装器
 pub struct USocketWrap {
     stream: RefCell<Option<UnixStream>>,
     fd: RefCell<Option<RawFd>>,
-    readable_callback: Arc<Mutex<Option<Root<JsFunction>>>>,
-    end_callback: Arc<Mutex<Option<Root<JsFunction>>>>,
-    reading_thread: RefCell<Option<thread::JoinHandle<()>>>,
-    stop_reading: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    callback: Arc<Mutex<Option<Root<JsFunction>>>>,
+    thread_handle: RefCell<Option<thread::JoinHandle<()>>>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl Finalize for USocketWrap {}
@@ -26,18 +27,19 @@ impl USocketWrap {
         Self {
             stream: RefCell::new(None),
             fd: RefCell::new(None),
-            readable_callback: Arc::new(Mutex::new(None)),
-            end_callback: Arc::new(Mutex::new(None)),
-            reading_thread: RefCell::new(None),
-            stop_reading: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(true)),
+            callback: Arc::new(Mutex::new(None)),
+            thread_handle: RefCell::new(None),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn connect(&self, path: &str) -> Result<(), io::Error> {
+    pub fn connect(&self, path: &str) -> Result<RawFd, io::Error> {
         let stream = UnixStream::connect(path)?;
-        *self.fd.borrow_mut() = Some(stream.as_raw_fd());
+        let fd = stream.as_raw_fd();
+        *self.fd.borrow_mut() = Some(fd);
         *self.stream.borrow_mut() = Some(stream);
-        Ok(())
+        Ok(fd)
     }
 
     pub fn adopt(&self, fd: RawFd) -> Result<(), io::Error> {
@@ -51,7 +53,6 @@ impl USocketWrap {
         let stream = self.stream.borrow();
         if let Some(stream) = stream.as_ref() {
             let raw_fd = stream.as_raw_fd();
-
             let data_buf = data.unwrap_or(&[]);
             let iov = [IoSlice::new(data_buf)];
 
@@ -63,17 +64,7 @@ impl USocketWrap {
                 sendmsg::<UnixAddr>(raw_fd, &iov, &[], MsgFlags::empty(), None)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
             };
-
             Ok(written)
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
-        }
-    }
-
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, io::Error> {
-        let mut stream = self.stream.borrow_mut();
-        if let Some(stream) = stream.as_mut() {
-            stream.read(buf)
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
         }
@@ -84,8 +75,7 @@ impl USocketWrap {
         if let Some(stream) = stream.as_ref() {
             let raw_fd = stream.as_raw_fd();
             let mut iov = [IoSliceMut::new(buf)];
-
-            let mut cmsg_buf = nix::cmsg_space!([RawFd; 3]);
+            let mut cmsg_buf = nix::cmsg_space!([RawFd; 64]);
 
             let msg = recvmsg::<UnixAddr>(raw_fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -96,25 +86,28 @@ impl USocketWrap {
                     fds.extend(received_fds);
                 }
             }
-
             Ok((msg.bytes, fds))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected"))
         }
     }
 
-    pub fn set_readable_callback(&self, callback: Root<JsFunction>) {
-        *self.readable_callback.lock().unwrap() = Some(callback);
+    pub fn set_callback(&self, callback: Root<JsFunction>) {
+        *self.callback.lock().unwrap() = Some(callback);
     }
 
-    pub fn set_end_callback(&self, callback: Root<JsFunction>) {
-        *self.end_callback.lock().unwrap() = Some(callback);
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
     }
 
-    pub fn start_reading(&self, channel: Channel) {
-        let stop = self.stop_reading.clone();
-        let readable_cb = self.readable_callback.clone();
-        let end_cb = self.end_callback.clone();
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    pub fn start_polling(&self, channel: Channel) {
+        let paused = self.paused.clone();
+        let callback = self.callback.clone();
+        let stop = self.stop_flag.clone();
         let fd = *self.fd.borrow();
 
         if fd.is_none() {
@@ -123,85 +116,144 @@ impl USocketWrap {
 
         let fd = fd.unwrap();
 
-        let handle = thread::spawn(move || loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-
-            let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
-
-            if ret > 0 {
-                if pfd.revents & libc::POLLIN != 0 {
-                    // 临时取出回调
-                    let cb = readable_cb.lock().unwrap().take();
-                    if let Some(callback) = cb {
-                        let cb_clone = readable_cb.clone();
-                        channel.send(move |mut cx| {
-                            let this = cx.undefined();
-                            let func = callback.into_inner(&mut cx);
-                            let args: Vec<Handle<JsValue>> = vec![];
-                            func.call(&mut cx, this, args)?;
-
-                            // 注意：Root 已经被消耗，无法放回
-                            // 需要在 JS 端重新设置回调
-                            Ok(())
-                        });
-                    }
+        let handle = thread::spawn(move || {
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
                 }
 
-                if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    let end = end_cb.lock().unwrap().take();
-                    if let Some(cb) = end {
-                        channel.send(move |mut cx| {
-                            let this = cx.undefined();
-                            let callback = cb.into_inner(&mut cx);
-                            let args: Vec<Handle<JsValue>> = vec![];
-                            callback.call(&mut cx, this, args)?;
-                            Ok(())
-                        });
+                if paused.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+
+                let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+
+                if ret > 0 {
+                    if pfd.revents & libc::POLLIN != 0 {
+                        // 有数据可读 - 先读取数据
+                        let mut buf = vec![0u8; 65536];
+                        let mut iov = [IoSliceMut::new(&mut buf)];
+                        let mut cmsg_buf = nix::cmsg_space!([RawFd; 64]);
+
+                        let read_result = recvmsg::<UnixAddr>(
+                            fd,
+                            &mut iov,
+                            Some(&mut cmsg_buf),
+                            MsgFlags::empty(),
+                        );
+
+                        match read_result {
+                            Ok(msg) => {
+                                let n = msg.bytes;
+                                let mut fds = Vec::new();
+                                for cmsg in msg.cmsgs() {
+                                    if let ControlMessageOwned::ScmRights(received_fds) = cmsg {
+                                        fds.extend(received_fds);
+                                    }
+                                }
+
+                                // 消耗回调并调用
+                                let cb = callback.lock().unwrap().take();
+                                if let Some(cb) = cb {
+                                    channel.send(move |mut cx| {
+                                        let this = cx.undefined();
+                                        let func = cb.into_inner(&mut cx);
+                                        let event = cx.string("data");
+
+                                        let data = if n > 0 {
+                                            let mut result = JsBuffer::new(&mut cx, n)?;
+                                            let slice = result.as_mut_slice(&mut cx);
+                                            slice.copy_from_slice(&buf[..n]);
+                                            result.as_value(&mut cx)
+                                        } else {
+                                            cx.null().upcast()
+                                        };
+
+                                        let fds_array = JsArray::new(&mut cx, fds.len());
+                                        for (i, fd) in fds.iter().enumerate() {
+                                            let fd_js = cx.number(*fd as f64);
+                                            fds_array.set(&mut cx, i as u32, fd_js)?;
+                                        }
+
+                                        func.call(
+                                            &mut cx,
+                                            this,
+                                            [event.upcast(), data, fds_array.upcast()],
+                                        )?;
+                                        Ok(())
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                // 读取失败，可能是连接关闭
+                                let cb = callback.lock().unwrap().take();
+                                if let Some(cb) = cb {
+                                    channel.send(move |mut cx| {
+                                        let this = cx.undefined();
+                                        let func = cb.into_inner(&mut cx);
+                                        let event = cx.string("end");
+                                        func.call(&mut cx, this, [event.upcast()])?;
+                                        Ok(())
+                                    });
+                                }
+                                break;
+                            }
+                        }
                     }
-                    break;
+
+                    if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                        let cb = callback.lock().unwrap().take();
+                        if let Some(cb) = cb {
+                            channel.send(move |mut cx| {
+                                let this = cx.undefined();
+                                let func = cb.into_inner(&mut cx);
+                                let event = cx.string("end");
+                                func.call(&mut cx, this, [event.upcast()])?;
+                                Ok(())
+                            });
+                        }
+                        break;
+                    }
                 }
             }
         });
 
-        *self.reading_thread.borrow_mut() = Some(handle);
-    }
-
-    pub fn stop_reading(&self) {
-        self.stop_reading.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.reading_thread.borrow_mut().take() {
-            let _ = handle.join();
-        }
+        *self.thread_handle.borrow_mut() = Some(handle);
     }
 
     pub fn shutdown(&self) -> Result<(), io::Error> {
         let stream = self.stream.borrow();
         if let Some(stream) = stream.as_ref() {
-            stream.shutdown(std::net::Shutdown::Both)?;
+            stream.shutdown(std::net::Shutdown::Write)?;
         }
         Ok(())
     }
 
     pub fn close(&self) {
-        self.stop_reading();
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.thread_handle.borrow_mut().take() {
+            let _ = handle.join();
+        }
         *self.stream.borrow_mut() = None;
         *self.fd.borrow_mut() = None;
     }
 }
 
+// UServerWrap - 服务器 socket 包装器
 pub struct UServerWrap {
     listener: RefCell<Option<UnixListener>>,
     fd: RefCell<Option<RawFd>>,
-    connection_callback: Arc<Mutex<Option<Root<JsFunction>>>>,
-    listening_thread: RefCell<Option<thread::JoinHandle<()>>>,
-    stop_listening: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    callback: Arc<Mutex<Option<Root<JsFunction>>>>,
+    thread_handle: RefCell<Option<thread::JoinHandle<()>>>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl Finalize for UServerWrap {}
@@ -211,46 +263,40 @@ impl UServerWrap {
         Self {
             listener: RefCell::new(None),
             fd: RefCell::new(None),
-            connection_callback: Arc::new(Mutex::new(None)),
-            listening_thread: RefCell::new(None),
-            stop_listening: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(true)),
+            callback: Arc::new(Mutex::new(None)),
+            thread_handle: RefCell::new(None),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn listen(&self, path: &str, backlog: i32) -> Result<(), io::Error> {
+    pub fn listen(&self, path: &str, backlog: i32) -> Result<RawFd, io::Error> {
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
-        *self.fd.borrow_mut() = Some(listener.as_raw_fd());
+        let fd = listener.as_raw_fd();
+        *self.fd.borrow_mut() = Some(fd);
         *self.listener.borrow_mut() = Some(listener);
         let _ = backlog;
-        Ok(())
+        Ok(fd)
     }
 
-    pub fn accept(&self) -> Result<Option<RawFd>, io::Error> {
-        let listener = self.listener.borrow();
-        if let Some(listener) = listener.as_ref() {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let fd = stream.as_raw_fd();
-                    std::mem::forget(stream);
-                    Ok(Some(fd))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-                Err(e) => Err(e),
-            }
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotConnected, "Not listening"))
-        }
+    pub fn set_callback(&self, callback: Root<JsFunction>) {
+        *self.callback.lock().unwrap() = Some(callback);
     }
 
-    pub fn set_connection_callback(&self, callback: Root<JsFunction>) {
-        *self.connection_callback.lock().unwrap() = Some(callback);
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
     }
 
     pub fn start_accepting(&self, channel: Channel) {
-        let stop = self.stop_listening.clone();
-        let conn_cb = self.connection_callback.clone();
+        let paused = self.paused.clone();
+        let callback = self.callback.clone();
+        let stop = self.stop_flag.clone();
         let fd = *self.fd.borrow();
 
         if fd.is_none() {
@@ -262,6 +308,11 @@ impl UServerWrap {
         let handle = thread::spawn(move || loop {
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+
+            if paused.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_millis(10));
+                continue;
             }
 
             let mut pfd = libc::pollfd {
@@ -280,14 +331,14 @@ impl UServerWrap {
                 };
 
                 if client_fd >= 0 {
-                    let cb = conn_cb.lock().unwrap().take();
-                    if let Some(callback) = cb {
+                    let cb = callback.lock().unwrap().take();
+                    if let Some(cb) = cb {
                         channel.send(move |mut cx| {
                             let this = cx.undefined();
-                            let func = callback.into_inner(&mut cx);
-                            let fd_arg = cx.number(client_fd as f64);
-                            let args: Vec<Handle<JsValue>> = vec![fd_arg.upcast()];
-                            func.call(&mut cx, this, args)?;
+                            let func = cb.into_inner(&mut cx);
+                            let event = cx.string("accept");
+                            let fd_val = cx.number(client_fd as f64);
+                            func.call(&mut cx, this, [event.upcast(), fd_val.upcast()])?;
                             Ok(())
                         });
                     }
@@ -295,49 +346,57 @@ impl UServerWrap {
             }
         });
 
-        *self.listening_thread.borrow_mut() = Some(handle);
-    }
-
-    pub fn stop_accepting(&self) {
-        self.stop_listening.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.listening_thread.borrow_mut().take() {
-            let _ = handle.join();
-        }
+        *self.thread_handle.borrow_mut() = Some(handle);
     }
 
     pub fn close(&self) {
-        self.stop_accepting();
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.thread_handle.borrow_mut().take() {
+            let _ = handle.join();
+        }
         *self.listener.borrow_mut() = None;
         *self.fd.borrow_mut() = None;
     }
 }
 
-fn usocket_wrap_new(mut cx: FunctionContext) -> JsResult<JsBox<USocketWrap>> {
-    Ok(cx.boxed(USocketWrap::new()))
+// Neon 导出函数
+fn usocket_wrap_new(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let wrap = USocketWrap::new();
+    let callback_arg = cx.argument_opt(0);
+    if let Some(cb) = callback_arg {
+        if let Ok(func) = cb.downcast::<JsFunction, _>(&mut cx) {
+            wrap.set_callback(func.root(&mut cx));
+        }
+    }
+    Ok(cx.boxed(wrap).upcast())
 }
 
 fn usocket_wrap_connect(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let path = cx.argument::<JsString>(1)?.value(&mut cx);
     match usocket_wrap.connect(&path) {
-        Ok(_) => {
-            let fd = usocket_wrap.fd.borrow();
-            Ok(cx.number(fd.unwrap_or(-1) as f64))
-        }
+        Ok(fd) => Ok(cx.number(fd as f64)),
         Err(e) => cx.throw_error(format!("Connect failed: {}", e)),
     }
 }
 
-fn usocket_wrap_adopt(mut cx: FunctionContext) -> JsResult<JsNumber> {
+fn usocket_wrap_adopt(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let fd = cx.argument::<JsNumber>(1)?.value(&mut cx) as RawFd;
     match usocket_wrap.adopt(fd) {
-        Ok(_) => Ok(cx.number(fd as f64)),
+        Ok(_) => Ok(cx.undefined()),
         Err(e) => cx.throw_error(format!("Adopt failed: {}", e)),
     }
 }
 
-fn usocket_wrap_write(mut cx: FunctionContext) -> JsResult<JsNumber> {
+fn usocket_wrap_set_callback(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
+    let callback = cx.argument::<JsFunction>(1)?;
+    usocket_wrap.set_callback(callback.root(&mut cx));
+    Ok(cx.undefined())
+}
+
+fn usocket_wrap_write(mut cx: FunctionContext) -> JsResult<JsValue> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let data_opt = cx.argument_opt(1);
     let fds_opt = cx.argument_opt(2);
@@ -374,43 +433,16 @@ fn usocket_wrap_write(mut cx: FunctionContext) -> JsResult<JsNumber> {
     };
 
     match usocket_wrap.write(data_bytes, fds_slice) {
-        Ok(n) => Ok(cx.number(n as f64)),
-        Err(e) => cx.throw_error(format!("Write failed: {}", e)),
+        Ok(n) => Ok(cx.number(n as f64).upcast()),
+        Err(e) => Ok(cx.error(format!("Write failed: {}", e))?.upcast()),
     }
 }
 
-fn usocket_wrap_read(mut cx: FunctionContext) -> JsResult<JsBuffer> {
+fn usocket_wrap_read(mut cx: FunctionContext) -> JsResult<JsObject> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let size = cx.argument::<JsNumber>(1)?.value(&mut cx) as usize;
-    let _copy = cx
-        .argument_opt(2)
-        .and_then(|v| v.downcast::<JsBoolean, _>(&mut cx).ok())
-        .map(|v| v.value(&mut cx))
-        .unwrap_or(true);
 
     let mut buf = vec![0u8; size];
-    match usocket_wrap.read(&mut buf) {
-        Ok(n) => {
-            let mut result = JsBuffer::new(&mut cx, n)?;
-            let slice = result.as_mut_slice(&mut cx);
-            slice.copy_from_slice(&buf[..n]);
-            Ok(result)
-        }
-        Err(e) => cx.throw_error(format!("Read failed: {}", e)),
-    }
-}
-
-fn usocket_wrap_read_with_fds(mut cx: FunctionContext) -> JsResult<JsObject> {
-    let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
-    let size = cx.argument::<JsNumber>(1)?.value(&mut cx) as usize;
-    let _copy = cx
-        .argument_opt(2)
-        .and_then(|v| v.downcast::<JsBoolean, _>(&mut cx).ok())
-        .map(|v| v.value(&mut cx))
-        .unwrap_or(true);
-
-    let mut buf = vec![0u8; size];
-
     match usocket_wrap.read_with_fds(&mut buf) {
         Ok((n, fds)) => {
             let data = if n > 0 {
@@ -433,36 +465,26 @@ fn usocket_wrap_read_with_fds(mut cx: FunctionContext) -> JsResult<JsObject> {
             obj.set(&mut cx, "fds", fds_array)?;
             Ok(obj)
         }
-        Err(e) => cx.throw_error(format!("Read with fds failed: {}", e)),
+        Err(e) => cx.throw_error(format!("Read failed: {}", e)),
     }
 }
 
-fn usocket_wrap_on_readable(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn usocket_wrap_resume(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
-    let callback = cx.argument::<JsFunction>(1)?;
-    let cb_root = callback.root(&mut cx);
-    usocket_wrap.set_readable_callback(cb_root);
+    usocket_wrap.resume();
     Ok(cx.undefined())
 }
 
-fn usocket_wrap_on_end(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn usocket_wrap_pause(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
-    let callback = cx.argument::<JsFunction>(1)?;
-    let cb_root = callback.root(&mut cx);
-    usocket_wrap.set_end_callback(cb_root);
+    usocket_wrap.pause();
     Ok(cx.undefined())
 }
 
-fn usocket_wrap_start_reading(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn usocket_wrap_start_polling(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
     let channel = cx.channel();
-    usocket_wrap.start_reading(channel);
-    Ok(cx.undefined())
-}
-
-fn usocket_wrap_stop_reading(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
-    usocket_wrap.stop_reading();
+    usocket_wrap.start_polling(channel);
     Ok(cx.undefined())
 }
 
@@ -480,8 +502,22 @@ fn usocket_wrap_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-fn userver_wrap_new(mut cx: FunctionContext) -> JsResult<JsBox<UServerWrap>> {
-    Ok(cx.boxed(UServerWrap::new()))
+fn userver_wrap_new(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let wrap = UServerWrap::new();
+    let callback_arg = cx.argument_opt(0);
+    if let Some(cb) = callback_arg {
+        if let Ok(func) = cb.downcast::<JsFunction, _>(&mut cx) {
+            wrap.set_callback(func.root(&mut cx));
+        }
+    }
+    Ok(cx.boxed(wrap).upcast())
+}
+
+fn userver_wrap_set_callback(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
+    let callback = cx.argument::<JsFunction>(1)?;
+    userver_wrap.set_callback(callback.root(&mut cx));
+    Ok(cx.undefined())
 }
 
 fn userver_wrap_listen(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -489,28 +525,20 @@ fn userver_wrap_listen(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let path = cx.argument::<JsString>(1)?.value(&mut cx);
     let backlog = cx.argument::<JsNumber>(2)?.value(&mut cx) as i32;
     match userver_wrap.listen(&path, backlog) {
-        Ok(_) => {
-            let fd = userver_wrap.fd.borrow();
-            Ok(cx.number(fd.unwrap_or(-1) as f64))
-        }
+        Ok(fd) => Ok(cx.number(fd as f64)),
         Err(e) => cx.throw_error(format!("Listen failed: {}", e)),
     }
 }
 
-fn userver_wrap_accept(mut cx: FunctionContext) -> JsResult<JsValue> {
+fn userver_wrap_resume(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
-    match userver_wrap.accept() {
-        Ok(Some(fd)) => Ok(cx.number(fd as f64).upcast()),
-        Ok(None) => Ok(cx.null().upcast()),
-        Err(e) => cx.throw_error(format!("Accept failed: {}", e)),
-    }
+    userver_wrap.resume();
+    Ok(cx.undefined())
 }
 
-fn userver_wrap_on_connection(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+fn userver_wrap_pause(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
-    let callback = cx.argument::<JsFunction>(1)?;
-    let cb_root = callback.root(&mut cx);
-    userver_wrap.set_connection_callback(cb_root);
+    userver_wrap.pause();
     Ok(cx.undefined())
 }
 
@@ -518,12 +546,6 @@ fn userver_wrap_start_accepting(mut cx: FunctionContext) -> JsResult<JsUndefined
     let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
     let channel = cx.channel();
     userver_wrap.start_accepting(channel);
-    Ok(cx.undefined())
-}
-
-fn userver_wrap_stop_accepting(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let userver_wrap = cx.argument::<JsBox<UServerWrap>>(0)?;
-    userver_wrap.stop_accepting();
     Ok(cx.undefined())
 }
 
@@ -538,22 +560,21 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("USocketWrap", usocket_wrap_new)?;
     cx.export_function("USocketWrap_connect", usocket_wrap_connect)?;
     cx.export_function("USocketWrap_adopt", usocket_wrap_adopt)?;
+    cx.export_function("USocketWrap_set_callback", usocket_wrap_set_callback)?;
     cx.export_function("USocketWrap_write", usocket_wrap_write)?;
     cx.export_function("USocketWrap_read", usocket_wrap_read)?;
-    cx.export_function("USocketWrap_read_with_fds", usocket_wrap_read_with_fds)?;
-    cx.export_function("USocketWrap_on_readable", usocket_wrap_on_readable)?;
-    cx.export_function("USocketWrap_on_end", usocket_wrap_on_end)?;
-    cx.export_function("USocketWrap_start_reading", usocket_wrap_start_reading)?;
-    cx.export_function("USocketWrap_stop_reading", usocket_wrap_stop_reading)?;
+    cx.export_function("USocketWrap_resume", usocket_wrap_resume)?;
+    cx.export_function("USocketWrap_pause", usocket_wrap_pause)?;
+    cx.export_function("USocketWrap_start_polling", usocket_wrap_start_polling)?;
     cx.export_function("USocketWrap_shutdown", usocket_wrap_shutdown)?;
     cx.export_function("USocketWrap_close", usocket_wrap_close)?;
 
     cx.export_function("UServerWrap", userver_wrap_new)?;
+    cx.export_function("UServerWrap_set_callback", userver_wrap_set_callback)?;
     cx.export_function("UServerWrap_listen", userver_wrap_listen)?;
-    cx.export_function("UServerWrap_accept", userver_wrap_accept)?;
-    cx.export_function("UServerWrap_on_connection", userver_wrap_on_connection)?;
+    cx.export_function("UServerWrap_resume", userver_wrap_resume)?;
+    cx.export_function("UServerWrap_pause", userver_wrap_pause)?;
     cx.export_function("UServerWrap_start_accepting", userver_wrap_start_accepting)?;
-    cx.export_function("UServerWrap_stop_accepting", userver_wrap_stop_accepting)?;
     cx.export_function("UServerWrap_close", userver_wrap_close)?;
 
     Ok(())
