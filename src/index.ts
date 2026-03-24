@@ -8,6 +8,7 @@ interface NativeUSocketWrap {
 	// 构造函数，接收回调函数
 	(callback: (event: string, data?: any) => void): NativeUSocketWrap;
 	connect(path: string): number;
+	get_pid(): number;
 	adopt(fd: number): void;
 	write(data?: Buffer, fds?: number[]): number | Error;
 	read(size: number): { data: Buffer | null; fds: number[] };
@@ -62,6 +63,7 @@ export interface UServerEvents {
 // USocket - 继承 Duplex 流
 export class USocket extends Duplex {
 	fd?: number;
+	pid?: number;
 	private _wrap: any = null;
 	private _shutdownCalled: boolean = false;
 	private _endReceived: boolean = false;
@@ -125,6 +127,7 @@ export class USocket extends Duplex {
 			native.USocketWrap_adopt(this._wrap, opts.fd);
 			this.fd = opts.fd;
 			native.USocketWrap_start_polling(this._wrap);
+			this._tryGetPid();
 			// 立即触发 connect 事件
 			process.nextTick(() => this.emit("connect"));
 			return;
@@ -137,8 +140,19 @@ export class USocket extends Duplex {
 		const result = native.USocketWrap_connect(this._wrap, opts.path);
 		this.fd = result;
 		native.USocketWrap_start_polling(this._wrap);
+		this._tryGetPid();
 		// 立即触发 connect 事件
 		process.nextTick(() => this.emit("connect"));
+	}
+
+	private _tryGetPid(): void {
+		if (this._wrap) {
+			try {
+				this.pid = native.USocketWrap_get_pid(this._wrap);
+			} catch (e) {
+				// ignore error
+			}
+		}
 	}
 
 	private _setupCallback(): void {

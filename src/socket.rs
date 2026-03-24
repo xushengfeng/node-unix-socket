@@ -168,7 +168,6 @@ impl USocketWrap {
                                         lock.as_ref().map(|cb| cb.to_inner(&mut cx))
                                     };
                                     if let Some(func) = func {
-                                        
                                         let event = cx.string("data");
 
                                         let data = if n > 0 {
@@ -191,7 +190,6 @@ impl USocketWrap {
                                             this,
                                             [event.upcast(), data, fds_array.upcast()],
                                         )?;
-                                        
                                     }
                                     Ok(())
                                 });
@@ -206,10 +204,8 @@ impl USocketWrap {
                                         lock.as_ref().map(|cb| cb.to_inner(&mut cx))
                                     };
                                     if let Some(func) = func {
-                                        
                                         let event = cx.string("end");
                                         func.call(&mut cx, this, [event.upcast()])?;
-                                        
                                     }
                                     Ok(())
                                 });
@@ -220,20 +216,18 @@ impl USocketWrap {
 
                     if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                         let callback_clone = callback.clone();
-                                channel.send(move |mut cx| {
-                                    let this = cx.undefined();
-                                    let func = {
-                                        let lock = callback_clone.lock().unwrap();
-                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
-                                    };
-                                    if let Some(func) = func {
-                                        
+                        channel.send(move |mut cx| {
+                            let this = cx.undefined();
+                            let func = {
+                                let lock = callback_clone.lock().unwrap();
+                                lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                            };
+                            if let Some(func) = func {
                                 let event = cx.string("end");
                                 func.call(&mut cx, this, [event.upcast()])?;
-                                
-                                    }
-                                    Ok(())
-                                });
+                            }
+                            Ok(())
+                        });
                         break;
                     }
                 }
@@ -347,21 +341,19 @@ impl UServerWrap {
 
                 if client_fd >= 0 {
                     let callback_clone = callback.clone();
-                                channel.send(move |mut cx| {
-                                    let this = cx.undefined();
-                                    let func = {
-                                        let lock = callback_clone.lock().unwrap();
-                                        lock.as_ref().map(|cb| cb.to_inner(&mut cx))
-                                    };
-                                    if let Some(func) = func {
-                                        
+                    channel.send(move |mut cx| {
+                        let this = cx.undefined();
+                        let func = {
+                            let lock = callback_clone.lock().unwrap();
+                            lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                        };
+                        if let Some(func) = func {
                             let event = cx.string("accept");
                             let fd_val = cx.number(client_fd as f64);
                             func.call(&mut cx, this, [event.upcast(), fd_val.upcast()])?;
-                            
-                                    }
-                                    Ok(())
-                                });
+                        }
+                        Ok(())
+                    });
                 }
             }
         });
@@ -397,6 +389,67 @@ fn usocket_wrap_connect(mut cx: FunctionContext) -> JsResult<JsNumber> {
     match usocket_wrap.connect(&path) {
         Ok(fd) => Ok(cx.number(fd as f64)),
         Err(e) => cx.throw_error(format!("Connect failed: {}", e)),
+    }
+}
+
+fn usocket_wrap_get_pid(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    let usocket_wrap = cx.argument::<JsBox<USocketWrap>>(0)?;
+    let fd = usocket_wrap.fd.borrow();
+    if let Some(fd) = *fd {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let mut ucred: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut ucred_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+            let res = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    &mut ucred as *mut _ as *mut libc::c_void,
+                    &mut ucred_len,
+                )
+            };
+
+            if res == 0 {
+                Ok(cx.number(ucred.pid as f64))
+            } else {
+                cx.throw_error(format!(
+                    "getsockopt failed: {}",
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut pid: libc::pid_t = 0;
+            let mut pid_len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+
+            let res = unsafe {
+                libc::getsockopt(
+                    fd,
+                    0,
+                    libc::LOCAL_PEERPID,
+                    &mut pid as *mut _ as *mut libc::c_void,
+                    &mut pid_len,
+                )
+            };
+
+            if res == 0 {
+                Ok(cx.number(pid as f64))
+            } else {
+                cx.throw_error(format!(
+                    "getsockopt failed: {}",
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        {
+            cx.throw_error("get_pid not supported on this platform")
+        }
+    } else {
+        cx.throw_error("Not connected")
     }
 }
 
@@ -579,6 +632,7 @@ fn userver_wrap_close(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("USocketWrap", usocket_wrap_new)?;
     cx.export_function("USocketWrap_connect", usocket_wrap_connect)?;
+    cx.export_function("USocketWrap_get_pid", usocket_wrap_get_pid)?;
     cx.export_function("USocketWrap_adopt", usocket_wrap_adopt)?;
     cx.export_function("USocketWrap_set_callback", usocket_wrap_set_callback)?;
     cx.export_function("USocketWrap_write", usocket_wrap_write)?;
