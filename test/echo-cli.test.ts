@@ -173,7 +173,6 @@ describe("Rust CLI Echo Tests", () => {
 
 				// Server echoes back
 				serverSocket.write(receivedByServer!);
-				serverSocket.end();
 
 				const clientResponse = await clientPromise;
 				expect(clientResponse).toBe(testMessage);
@@ -215,7 +214,6 @@ describe("Rust CLI Echo Tests", () => {
 
 				// Server echoes back
 				serverSocket.write(received);
-				serverSocket.end();
 
 				const clientResponse = await clientPromise;
 				expect(clientResponse).toBe(largeMessage);

@@ -12,6 +12,7 @@ fn main() {
 
     let socket_path = &args[1];
     let message = &args[2];
+    let expected_len = message.len();
 
     let mut stream = UnixStream::connect(socket_path).expect("Failed to connect to server");
 
@@ -20,16 +21,12 @@ fn main() {
         .write_all(message.as_bytes())
         .expect("Failed to write message");
 
-    // Shutdown write to signal end of message
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .expect("Failed to shutdown write");
-
     // Read echo response
     let mut response = String::new();
     let mut buffer = [0u8; 4096];
 
-    loop {
+    // 不再死等 EOF (0)，而是等待接收到期望长度的数据后就停止读取
+    while response.len() < expected_len {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
