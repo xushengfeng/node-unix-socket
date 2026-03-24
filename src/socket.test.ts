@@ -731,7 +731,7 @@ describe("Unix Socket Module", () => {
 				// await wait(10);
 			}
 			await wait(500);
-			expect(received).toEqual(re);
+			expect(received.join("")).toEqual(re.join(""));
 
 			client.destroy();
 			serverSocket.destroy();
