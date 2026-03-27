@@ -6,9 +6,10 @@
 
 - 🚀 **高性能** - 使用 Rust 实现，基于 poll 事件循环
 - 📁 **文件描述符传递** - 支持通过 Unix socket 传递文件描述符 (SCM_RIGHTS)
-- 🔍 **对方pid获取** - 读取连接对方的pid，在确认身份时非常有用
+- 🔍 **对方pid获取** - 读取连接对方的 pid，在确认身份时非常有用
 - 📡 **事件驱动** - 基于 `data` 事件接收数据
-- 📦 **TypeScript** - 完整的类型定义
+- 🏗 **TypeScript** - 完整的类型定义
+- 📦 **开箱即用** - 无需编译/重编译，自带 Linux 兼容二进制
 
 ## 安装
 
@@ -116,3 +117,7 @@ pnpm test
 - **Neon** - Rust/Node.js 桥接
 - **Vite** - 打包
 - **Vitest** - 测试
+
+## 相关项目
+
+[usocket](https://github.com/jhs67/usocket) 参考
