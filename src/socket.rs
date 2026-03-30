@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr};
+use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, UnixAddr, recvmsg, sendmsg};
 
 // USocketWrap - 客户端 socket 包装器
 pub struct USocketWrap {
@@ -314,46 +314,48 @@ impl UServerWrap {
 
         let fd = fd.unwrap();
 
-        let handle = thread::spawn(move || loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
+        let handle = thread::spawn(move || {
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
 
-            if paused.load(Ordering::Relaxed) {
-                thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
+                if paused.load(Ordering::Relaxed) {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
 
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-
-            let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
-
-            if ret > 0 && pfd.revents & libc::POLLIN != 0 {
-                let client_fd = unsafe {
-                    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-                    let mut len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-                    libc::accept(fd, &mut addr as *mut _ as *mut _, &mut len)
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
                 };
 
-                if client_fd >= 0 {
-                    let callback_clone = callback.clone();
-                    channel.send(move |mut cx| {
-                        let this = cx.undefined();
-                        let func = {
-                            let lock = callback_clone.lock().unwrap();
-                            lock.as_ref().map(|cb| cb.to_inner(&mut cx))
-                        };
-                        if let Some(func) = func {
-                            let event = cx.string("accept");
-                            let fd_val = cx.number(client_fd as f64);
-                            func.call(&mut cx, this, [event.upcast(), fd_val.upcast()])?;
-                        }
-                        Ok(())
-                    });
+                let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+
+                if ret > 0 && pfd.revents & libc::POLLIN != 0 {
+                    let client_fd = unsafe {
+                        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+                        let mut len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+                        libc::accept(fd, &mut addr as *mut _ as *mut _, &mut len)
+                    };
+
+                    if client_fd >= 0 {
+                        let callback_clone = callback.clone();
+                        channel.send(move |mut cx| {
+                            let this = cx.undefined();
+                            let func = {
+                                let lock = callback_clone.lock().unwrap();
+                                lock.as_ref().map(|cb| cb.to_inner(&mut cx))
+                            };
+                            if let Some(func) = func {
+                                let event = cx.string("accept");
+                                let fd_val = cx.number(client_fd as f64);
+                                func.call(&mut cx, this, [event.upcast(), fd_val.upcast()])?;
+                            }
+                            Ok(())
+                        });
+                    }
                 }
             }
         });
