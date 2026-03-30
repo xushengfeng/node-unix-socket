@@ -38,7 +38,6 @@ export interface USocketOptions {
 export interface USocketWriteChunk {
 	data?: Buffer;
 	fds?: number[];
-	callback?: (chunk: USocketWriteChunk) => void;
 }
 
 // USocket 事件类型
@@ -89,15 +88,34 @@ export class USocket extends Duplex {
 		return super.on(event, listener);
 	}
 
-	once<K extends keyof USocketEvents>(event: K, listener: USocketEvents[K]): this;
+	once<K extends keyof USocketEvents>(
+		event: K,
+		listener: USocketEvents[K],
+	): this;
 	once(event: string, listener: (...args: any[]) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this {
 		return super.once(event, listener);
 	}
 
-	emit<K extends keyof USocketEvents>(event: K, ...args: Parameters<USocketEvents[K]>): boolean;
+	emit<K extends keyof USocketEvents>(
+		event: K,
+		...args: Parameters<USocketEvents[K]>
+	): boolean;
 	emit(event: string | symbol, ...args: any[]): boolean {
 		return super.emit(event, ...args);
+	}
+
+	write(
+		chunk: Buffer | Uint8Array | string | USocketWriteChunk,
+		cb?: (error: Error | null | undefined) => void,
+	): boolean;
+	write(
+		chunk: Buffer | Uint8Array | string | USocketWriteChunk,
+		encoding: BufferEncoding,
+		cb?: (error: Error | null | undefined) => void,
+	): boolean;
+	write(chunk: any, encoding?: any, cb?: any): boolean {
+		return super.write(chunk, encoding, cb);
 	}
 
 	connect(opts: USocketOptions | string, cb?: () => void): void {
@@ -222,7 +240,11 @@ export class USocket extends Duplex {
 		// Duplex 要求返回 void，但我们不需要做任何事
 	}
 
-	_write(chunk: any, encoding: string | null, callback: (err?: Error) => void): void {
+	_write(
+		chunk: Buffer | { callback?: () => void; data: Buffer; fds?: number[] },
+		encoding: string | null,
+		callback: (err?: Error) => void,
+	): void {
 		if (!this._wrap) {
 			callback(new Error("USocket not connected"));
 			return;
@@ -230,12 +252,10 @@ export class USocket extends Duplex {
 
 		let data: Buffer | undefined;
 		let fds: number[] | undefined;
-		let cb: ((chunk: USocketWriteChunk) => void) | undefined;
+		let cb: (() => void) | undefined;
 
 		if (Buffer.isBuffer(chunk)) {
 			data = chunk;
-		} else if (Array.isArray(chunk)) {
-			fds = chunk;
 		} else {
 			cb = chunk.callback;
 			data = chunk.data;
@@ -266,7 +286,7 @@ export class USocket extends Duplex {
 		}
 
 		if (!data || r === data.length) {
-			if (cb) cb(chunk);
+			if (cb) cb();
 			callback();
 			return;
 		}
@@ -274,7 +294,7 @@ export class USocket extends Duplex {
 		// 部分写入，等待 drain
 		this._drain = this._write.bind(
 			this,
-			{ data: data.subarray(r), callback: cb },
+			{ data: data.subarray(r), callback: cb ?? (() => {}), fds: fds },
 			encoding,
 			callback,
 		);
@@ -300,19 +320,11 @@ export class USocket extends Duplex {
 		return { data, fds };
 	}
 
-	unshiftWithFds(chunk: Buffer | null, fds?: number[]): void {
-		if (chunk) {
-			super.unshift(chunk);
-		}
-
-		if (Array.isArray(fds) && this._wrap) {
-			while (fds.length > 0) {
-				this._fds.unshift(fds.pop()!);
-			}
-		}
-	}
-
-	end(data?: string | Buffer | (() => void), encoding?: BufferEncoding | (() => void), callback?: () => void): this {
+	end(
+		data?: string | Buffer | (() => void),
+		encoding?: BufferEncoding | (() => void),
+		callback?: () => void,
+	): this {
 		// 处理不同的参数重载
 		if (typeof data === "function") {
 			callback = data;
@@ -367,13 +379,19 @@ export class UServer extends EventEmitter {
 		return super.on(event, listener);
 	}
 
-	once<K extends keyof UServerEvents>(event: K, listener: UServerEvents[K]): this;
+	once<K extends keyof UServerEvents>(
+		event: K,
+		listener: UServerEvents[K],
+	): this;
 	once(event: string, listener: (...args: any[]) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this {
 		return super.once(event, listener);
 	}
 
-	emit<K extends keyof UServerEvents>(event: K, ...args: Parameters<UServerEvents[K]>): boolean;
+	emit<K extends keyof UServerEvents>(
+		event: K,
+		...args: Parameters<UServerEvents[K]>
+	): boolean;
 	emit(event: string | symbol, ...args: any[]): boolean {
 		return super.emit(event, ...args);
 	}
@@ -407,7 +425,7 @@ export class UServer extends EventEmitter {
 
 		// 创建 wrap - 注意：native.UServerWrap 是一个函数，不是构造函数
 		this._wrap = native.UServerWrap() as NativeUServerWrap;
-		
+
 		// 设置回调
 		this._setupCallback();
 
