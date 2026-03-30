@@ -78,6 +78,36 @@ describe("Rust CLI Echo Tests", () => {
 		});
 	}
 
+	function runRustFdEchoClient(socketPath: string): Promise<string> {
+		const clientBin = path.join(rustBinDir, "fd-echo-client");
+		return new Promise((resolve, reject) => {
+			const proc = child_process.spawn(clientBin, [socketPath], {
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+
+			let stdout = "";
+			let stderr = "";
+
+			proc.stdout.on("data", (data) => {
+				stdout += data.toString();
+			});
+
+			proc.stderr.on("data", (data) => {
+				stderr += data.toString();
+			});
+
+			proc.on("close", (code) => {
+				if (code !== 0) {
+					reject(new Error(`Client exited with code ${code}: ${stderr}`));
+				} else {
+					resolve(stdout.trim());
+				}
+			});
+
+			proc.on("error", reject);
+		});
+	}
+
 	describe("Rust Echo Server + JS Client", () => {
 		it("should echo message from JS client", async () => {
 			const socketPath = path.join(testSocketDir, "rust-server-js-client.sock");
@@ -219,6 +249,61 @@ describe("Rust CLI Echo Tests", () => {
 				expect(clientResponse).toBe(largeMessage);
 
 				serverSocket.destroy();
+			} finally {
+				server.close();
+				cleanup(socketPath);
+			}
+		});
+
+		it("should send fd to Rust client, get reversed string fd back", async () => {
+			const socketPath = path.join(
+				testSocketDir,
+				"js-server-rust-fd-client.sock",
+			);
+			cleanup(socketPath);
+
+			const server = new UServer();
+			server.listen(socketPath);
+			server.resume();
+
+			try {
+				const serverSocketPromise = waitForConnection(server);
+				await wait(100);
+
+				const clientPromise = runRustFdEchoClient(socketPath);
+				const serverSocket = await serverSocketPromise;
+
+				// create a temp file with string "hello world"
+				const tempFile = path.join(testSocketDir, "temp_send.txt");
+				fs.writeFileSync(tempFile, "hello world");
+				const fdToSend = fs.openSync(tempFile, "r");
+
+				// send fd
+				serverSocket.write({ data: Buffer.from("1"), fds: [fdToSend] });
+				fs.closeSync(fdToSend);
+
+				// wait for response
+				const receivedData = await new Promise<{ data: Buffer; fds: number[] }>(
+					(resolve) => {
+						serverSocket.on("data", (data: Buffer, fds: number[]) => {
+							if (fds.length > 0) {
+								resolve({ data, fds });
+							}
+						});
+					},
+				);
+
+				expect(receivedData.fds.length).toBe(1);
+				const receivedFd = receivedData.fds[0];
+
+				// read the received fd
+				const reversedContent = fs.readFileSync(receivedFd, "utf-8");
+				expect(reversedContent).toBe("dlrow olleh");
+
+				fs.closeSync(receivedFd);
+				serverSocket.destroy();
+
+				await clientPromise;
 			} finally {
 				server.close();
 				cleanup(socketPath);

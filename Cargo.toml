@@ -16,6 +16,10 @@ path = "test/bin/echo_server.rs"
 name = "echo-client"
 path = "test/bin/echo_client.rs"
 
+[[bin]]
+name = "fd-echo-client"
+path = "test/bin/fd_echo_client.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
