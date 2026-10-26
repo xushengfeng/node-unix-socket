@@ -1,8 +1,35 @@
 import { Duplex } from "stream";
 import { EventEmitter } from "events";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-// 加载原生模块
-const native = require("../index.node");
+// 加载原生模块：CJS 构建中 __filename 可用；ESM 中回退到 import.meta.url。
+const require = createRequire(
+	typeof __filename === "string" ? __filename : import.meta.url,
+);
+
+const packageRoot =
+	typeof __dirname === "string"
+		? join(__dirname, "..")
+		: dirname(dirname(fileURLToPath(import.meta.url)));
+
+const prebuilt = join(
+	packageRoot,
+	"prebuilds",
+	`${process.platform}-${process.arch}`,
+	"index.node",
+);
+const legacy = join(packageRoot, "index.node");
+
+if (!existsSync(prebuilt) && !existsSync(legacy)) {
+	throw new Error(
+		`myde-unix-socket: 没有 ${process.platform}-${process.arch} 的原生模块，请先运行 npm run build:rust`,
+	);
+}
+
+const native = require(existsSync(prebuilt) ? prebuilt : legacy);
 
 interface NativeUSocketWrap {
 	// 构造函数，接收回调函数

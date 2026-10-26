@@ -10,8 +10,8 @@ export default defineConfig({
 			fileName: (format) => `index.${format === "es" ? "mjs" : "cjs"}`,
 		},
 		rollupOptions: {
-			// 确保原生模块被排除在打包之外
-			external: [/\.node$/, "stream", "events"],
+			// 确保原生模块和 Node 内置模块被排除在打包之外
+			external: [/^node:/, /\.node$/, "stream", "events"],
 			output: {
 				exports: "named",
 			},
