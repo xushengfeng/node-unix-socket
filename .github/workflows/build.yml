@@ -39,6 +39,9 @@ jobs:
                   npm run build:ts
                   npm run build:types
 
+            - name: 构建测试用 Rust 程序
+              run: cargo build --bins
+
             - name: 运行测试
               run: npm test
 
@@ -78,4 +81,6 @@ jobs:
                   npm run build:types
 
             - name: 发布到 npm
-              run: npm publish
+              run: |
+                  unset NODE_AUTH_TOKEN
+                  npm publish
